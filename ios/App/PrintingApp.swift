@@ -95,7 +95,7 @@ struct Printer: Identifiable, Hashable {
 }
 
 /// The app: the core, where the user is, and the printers as last read (`status`), read again on
-/// each of the spur's events and every few seconds while the app's in front.
+/// each of the extension's events and every few seconds while the app's in front.
 @MainActor @Observable
 final class Model {
   let core = Core(app: "printers")

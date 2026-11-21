@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs"
 import path from "node:path"
 import { Effect, Schema } from "effect"
 
-import { tool } from "spur-kit"
+import { tool } from "switch-ext-kit"
 import { COMMANDS } from "./config.ts"
 
 export const CLI = process.env.PRINTERS_BAMBU ?? "bambu"

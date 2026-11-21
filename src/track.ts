@@ -1,6 +1,6 @@
 // What changed on a printer between two reports, as events: its state, a job starting, moving,
 // finishing or failing, filament running out, a new error, its slots. Pure, given the time.
-import type { Draft } from "spur-kit"
+import type { Draft } from "switch-ext-kit"
 
 import {
   FilamentRanOut,

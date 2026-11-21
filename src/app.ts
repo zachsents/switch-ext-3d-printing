@@ -1,4 +1,4 @@
-// Bambu printers on the LAN as a spur: their state
+// Bambu printers on the LAN as an extension: their state
 // from one MQTT session each, their cameras, filament, job control and sending a plate. Events for
 // what changes; a widget per printer in Switch's catalog: its line, filament and live camera.
 //
@@ -10,8 +10,8 @@ import { homedir } from "node:os"
 import path from "node:path"
 import { Context, Effect, Layer, Schema } from "effect"
 
-import { answer, AppEvents, defineApp, surface, SWITCH_CATALOG, tool } from "spur-kit"
-import type { Draft, WidgetDef } from "spur-kit"
+import { answer, AppEvents, defineApp, surface, SWITCH_CATALOG, tool } from "switch-ext-kit"
+import type { Draft, WidgetDef } from "switch-ext-kit"
 import { Camera, tlsEye } from "./camera.ts"
 import { COMMANDS, configured, SIM, writeName } from "./config.ts"
 import type { Printer } from "./config.ts"
@@ -101,7 +101,7 @@ interface Entry {
 }
 
 const ignore = () => {
-  // The iPhone's tool failing must not stop the spur.
+  // The iPhone's tool failing must not stop the extension.
 }
 
 const activityOf = (v: View): PrintActivity => ({

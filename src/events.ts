@@ -1,5 +1,5 @@
 // The printers' events, each versioned: what changed on a printer, and its jobs.
-import { defineEvent } from "spur-kit"
+import { defineEvent } from "switch-ext-kit"
 import { Schema } from "effect"
 
 const who = { printer: Schema.String, name: Schema.String }

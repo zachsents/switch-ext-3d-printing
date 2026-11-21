@@ -1,7 +1,7 @@
 // One printer's MQTT session (TLS on 8883, user bblp, the access code as the password), held for as
-// long as the spur runs, beside any other client's. It reconnects with backoff, asks for a full
-// report when the printer goes quiet, and drops a session gone silent. The wire is pluggable, so the
-// simulator speaks the same requests and reports.
+// long as the extension runs, beside any other client's. It reconnects with backoff, asks for a
+// full report when the printer goes quiet, and drops a session gone silent. The wire is pluggable,
+// so the simulator speaks the same requests and reports.
 import mqtt from "mqtt"
 
 import { readConnection } from "./config.ts"
