@@ -14,6 +14,10 @@ Extensions view (⌘K, Extensions). Switch runs it on the first machine with wha
 
 - One `<id>.env` per printer in `~/.config/bambu` (or `$PRINTERS_CONFIG`): `BAMBU_HOST`,
   `BAMBU_SERIAL`, `BAMBU_ACCESS_CODE`, and `NAME` for what to call it (rename sets it).
+- If another job tracker reports a printer's outcomes, set `JOB_OUTCOMES=off` in that
+  printer's file to omit duplicate completion/failure events. Status, progress, errors,
+  cameras and Live Activities continue. Durations are reported only when this observer
+  saw the job start; connecting mid-print leaves the duration unknown.
 - The `bambu` CLI on `PATH` (or `$PRINTERS_BAMBU`) for slicing and sending.
 - Commands reach real printers only with `PRINTERS_COMMANDS=on`; `PRINTERS_SIM=on` runs two
   simulated printers instead.

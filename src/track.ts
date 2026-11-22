@@ -141,7 +141,8 @@ export const track = (
       stage,
       errors,
       slots,
-      startedAt: isActive(v.state) ? now : null,
+      // An already running job began before this observer connected.
+      startedAt: null,
       offlineSince: null,
     }
     return { seen, drafts: [] }

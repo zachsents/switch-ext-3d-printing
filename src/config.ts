@@ -34,6 +34,8 @@ export interface Printer {
   readonly id: string
   readonly name: string
   readonly model: string
+  /** Another job tracker can own completion/failure events for this printer. */
+  readonly jobOutcomes: boolean
 }
 
 /** KEY=VALUE lines, skipping # comments, like the CLI's read_env. */
@@ -75,7 +77,12 @@ export const configured = (): Printer[] => {
         const env = parseEnv(readFileSync(path.join(CONFIG_DIR, `${id}.env`), "utf-8"))
         const name = env.NAME ?? ""
         return [
-          { id, name: name === "" ? id : name, model: MODELS[c.serial.slice(0, 3)] ?? "Bambu" },
+          {
+            id,
+            name: name === "" ? id : name,
+            model: MODELS[c.serial.slice(0, 3)] ?? "Bambu",
+            jobOutcomes: !["off", "false", "0"].includes((env.JOB_OUTCOMES ?? "").toLowerCase()),
+          },
         ]
       } catch {
         return []

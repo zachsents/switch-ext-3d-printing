@@ -13,8 +13,8 @@ import type { Dial, WireEvents } from "./link.ts"
 import type { Raw } from "./state.ts"
 
 export const SIM_PRINTERS: Printer[] = [
-  { id: "sim-p1p", name: "Sim P1P", model: "P1P" },
-  { id: "sim-p1s", name: "Sim P1S", model: "P1S" },
+  { id: "sim-p1p", name: "Sim P1P", model: "P1P", jobOutcomes: true },
+  { id: "sim-p1s", name: "Sim P1S", model: "P1S", jobOutcomes: true },
 ]
 
 const tray = (id: number, type: string, color: string, idx: string) => ({

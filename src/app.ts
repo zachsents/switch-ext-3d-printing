@@ -238,7 +238,12 @@ export class Printers extends Context.Service<
             if (d.type === JobFinished.type) {
               doneAt.set(v.id, Date.now())
             }
-            emit(d)
+            if (
+              e.printer.jobOutcomes ||
+              (d.type !== JobFinished.type && d.type !== JobFailed.type)
+            ) {
+              emit(d)
+            }
           }
           if (out.activity) {
             const { kind, key } = out.activity
