@@ -17,7 +17,7 @@ export interface PrintActivity {
   readonly endsAt: number | null
 }
 
-/** The iPhone's Live Activity tool, by one key per print. */
+/** The iPhone's Live Activity tool, by one stable key per printer. */
 export interface LiveActivities {
   readonly start: (key: string, content: PrintActivity) => Promise<void>
   readonly update: (key: string, content: PrintActivity) => Promise<void>

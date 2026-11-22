@@ -34,7 +34,7 @@ export interface Seen {
 export interface Tracked {
   readonly seen: Seen | undefined
   readonly drafts: readonly Draft[]
-  /** The print's Live Activity: started, moved or ended, by one key per print. */
+  /** One activity slot per printer, stable across observer restarts. */
   readonly activity?: { readonly kind: "start" | "update" | "end"; readonly key: string }
 }
 
@@ -83,14 +83,14 @@ const jobOf = (before: Seen, v: View, now: number) => {
   if (is && (!was || file !== before.file)) {
     startedAt = now
     drafts.push(JobStarted.make({ ...w, ...progressOf(v) }))
-    activity = { kind: "start", key: `${v.id}:${now}` }
+    activity = { kind: "start", key: v.id }
   } else if (is && (v.percent !== before.percent || v.phase !== before.phase)) {
     drafts.push(JobProgress.make({ ...w, ...progressOf(v), phase: v.phase }))
-    activity = { kind: "update", key: `${v.id}:${startedAt ?? 0}` }
+    activity = { kind: "update", key: v.id }
   }
   if (was && !is) {
     drafts.push(ended(v, file, startedAt, now))
-    activity = { kind: "end", key: `${v.id}:${startedAt ?? 0}` }
+    activity = { kind: "end", key: v.id }
     startedAt = null
   }
   return { drafts, file, startedAt, activity }
@@ -145,7 +145,11 @@ export const track = (
       startedAt: null,
       offlineSince: null,
     }
-    return { seen, drafts: [] }
+    return {
+      seen,
+      drafts: [],
+      activity: { kind: isActive(v.state) ? "start" : "end", key: v.id },
+    }
   }
   // A drop shorter than GONE_MS is a reconnect; the next session's report picks up from here.
   if (!v.online) {

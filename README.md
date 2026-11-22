@@ -18,6 +18,8 @@ Extensions view (⌘K, Extensions). Switch runs it on the first machine with wha
   printer's file to omit duplicate completion/failure events. Status, progress, errors,
   cameras and Live Activities continue. Durations are reported only when this observer
   saw the job start; connecting mid-print leaves the duration unknown.
+- Running uses one activity slot per printer. On reconnect, a running printer replaces
+  that slot and an idle printer closes it, so observer restarts cannot strand old jobs.
 - The `bambu` CLI on `PATH` (or `$PRINTERS_BAMBU`) for slicing and sending.
 - Commands reach real printers only with `PRINTERS_COMMANDS=on`; `PRINTERS_SIM=on` runs two
   simulated printers instead.
