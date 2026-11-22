@@ -22,7 +22,8 @@ Extensions view (⌘K, Extensions). Switch runs it on the first machine with wha
   while it was down is still reported. A job already running when it first connects has no
   duration.
 - Running uses one activity slot per printer. On reconnect, a running printer replaces
-  that slot and an idle printer closes it, so observer restarts cannot strand old jobs.
+  that slot, and a job kept as running that the printer isn't printing now is ended (finished or failed as
+  the printer says, else done); an idle printer's ended print isn't ended again.
 - The `bambu` CLI on `PATH` (or `$PRINTERS_BAMBU`) for slicing and sending.
 - Commands reach real printers only with `PRINTERS_COMMANDS=on`; `PRINTERS_SIM=on` runs two
   simulated printers instead.

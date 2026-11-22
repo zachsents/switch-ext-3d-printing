@@ -146,19 +146,32 @@ const alertsOf = (before: Seen, v: View, stage: number | undefined, slots: strin
 
 /**
  * The first report is where it stands. A job it kept that's still the printer's plate goes on, or,
- * when the printer says it finished or failed meanwhile, ends now. Nothing else is told.
+ * when the printer isn't printing now, ends: finished or failed as the printer says, else done, as
+ * Kerf's Switchboard appendage ended a print on its first look only when the job it kept was still
+ * running (switchboard/widgets.py `_print_activity`, kerf 8b6ead8). Nothing else is told: an idle
+ * printer's last print, ended before or never kept, isn't ended again.
  */
 const first = (v: View, seen: Seen, kept: Job | undefined, now: number): Tracked => {
-  const activity = { kind: isActive(v.state) ? ("start" as const) : ("end" as const), key: v.id }
   const open = kept?.endedAt === null && kept.file === seen.file ? kept : undefined
-  if (open && isActive(v.state)) {
-    return { seen: { ...seen, startedAt: open.startedAt }, drafts: [], activity }
+  if (isActive(v.state)) {
+    const activity = { kind: "start" as const, key: v.id }
+    return open
+      ? { seen: { ...seen, startedAt: open.startedAt }, drafts: [], activity }
+      : { seen, drafts: [], activity }
   }
   if (open && (v.state === "FINISH" || v.state === "FAILED")) {
     const { draft, job } = ended(v, open.file, open.startedAt, now)
-    return { seen, drafts: [draft], activity, job }
+    return { seen, drafts: [draft], activity: { kind: "end", key: v.id }, job }
   }
-  return { seen, drafts: [], activity }
+  if (open) {
+    return {
+      seen,
+      drafts: [],
+      activity: { kind: "end", key: v.id },
+      job: { ...open, endedAt: now },
+    }
+  }
+  return { seen, drafts: [] }
 }
 
 export const track = (
