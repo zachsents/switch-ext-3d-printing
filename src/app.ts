@@ -31,6 +31,7 @@ import {
   JobProgress,
   JobStarted,
   PrinterError,
+  PrinterRenamed,
   SlotsChanged,
   StateChanged,
 } from "./events.ts"
@@ -150,6 +151,7 @@ export class Printers extends Context.Service<
     readonly holds: Map<string, Hold>
     /** When a printer's last job finished, as seen since start; null if not seen. */
     readonly doneAt: (id: string) => number | null
+    readonly emit: (draft: Draft) => void
   }
 >()("switch/printers/Printers") {
   static readonly layer = (options: { readonly activities?: LiveActivities } = {}) =>
@@ -285,6 +287,7 @@ export class Printers extends Context.Service<
           card: SIM ? simCard : ftpsCard,
           holds,
           doneAt: (id: string) => doneAt.get(id) ?? null,
+          emit,
         }
       }),
     )
@@ -835,6 +838,7 @@ const rename = tool(
       if (taken) {
         return yield* Effect.fail(new Error(`Another printer is called ${name}`))
       }
+      const from = e.printer.name
       if (!SIM) {
         yield* Effect.try({
           try: () => {
@@ -844,6 +848,7 @@ const rename = tool(
         })
       }
       e.printer = { ...e.printer, name }
+      printers.emit(PrinterRenamed.make({ printer: e.printer.id, name, from }))
       return printers.view(e)
     }),
 )
@@ -925,6 +930,7 @@ const printerWidget = (p: Printer): WidgetDef => ({
   tool: `card_${p.id}`,
   refresh: [
     StateChanged.type,
+    PrinterRenamed.type,
     JobStarted.type,
     JobProgress.type,
     JobFinished.type,

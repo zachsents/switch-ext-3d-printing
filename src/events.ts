@@ -27,6 +27,11 @@ export const StateChanged = defineEvent(
   1,
   Schema.Struct({ ...who, from: phase, to: phase }),
 )
+export const PrinterRenamed = defineEvent(
+  "printers.renamed",
+  1,
+  Schema.Struct({ ...who, from: Schema.String }),
+)
 export const JobStarted = defineEvent(
   "printers.job_started",
   1,
@@ -77,6 +82,7 @@ export const SlotsChanged = defineEvent(
 
 export const EVENTS = [
   StateChanged,
+  PrinterRenamed,
   JobStarted,
   JobProgress,
   JobFinished,
