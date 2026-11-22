@@ -10,7 +10,15 @@ import { homedir } from "node:os"
 import path from "node:path"
 import { Context, Effect, Layer, Schema } from "effect"
 
-import { answer, AppEvents, defineApp, surface, SWITCH_CATALOG, tool } from "switch-ext-kit"
+import {
+  answer,
+  AppEvents,
+  BASIC_CATALOG,
+  defineApp,
+  surface,
+  SWITCH_CATALOG,
+  tool,
+} from "switch-ext-kit"
 import type { Draft, WidgetDef } from "switch-ext-kit"
 import { Camera, tlsEye } from "./camera.ts"
 import { COMMANDS, configured, SIM, writeName } from "./config.ts"
@@ -945,8 +953,8 @@ const printerWidget = (p: Printer): WidgetDef => ({
   ],
   a2ui: () =>
     surface("printer", SWITCH_CATALOG, [
-      { id: "root", component: "Stack", children: ["lines", "camera"] },
-      { id: "lines", component: "Lines", children: ["line"] },
+      { id: "root", component: "Column", catalogId: BASIC_CATALOG, children: ["lines", "camera"] },
+      { id: "lines", component: "List", catalogId: BASIC_CATALOG, children: ["line"] },
       {
         id: "line",
         component: "Row",
