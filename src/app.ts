@@ -18,6 +18,7 @@ import type { Printer } from "./config.ts"
 import { presetFor } from "./filaments.ts"
 import { ftpsCard } from "./files.ts"
 import type { Card } from "./files.ts"
+import { loadJobs, saveJobs } from "./jobs.ts"
 import { Link, mqttDial } from "./link.ts"
 import { noActivities } from "./live.ts"
 import type { LiveActivities, PrintActivity } from "./live.ts"
@@ -149,8 +150,8 @@ export class Printers extends Context.Service<
     readonly card: Card
     /** Heat holds, by printer id. */
     readonly holds: Map<string, Hold>
-    /** When a printer's last job finished, as seen since start; null if not seen. */
-    readonly doneAt: (id: string) => number | null
+    /** When the plate a printer shows finished, as its kept job says; null if not seen. */
+    readonly doneAt: (v: View) => number | null
     readonly emit: (draft: Draft) => void
   }
 >()("switch/printers/Printers") {
@@ -226,20 +227,21 @@ export class Printers extends Context.Service<
         }
 
         const seen = new Map<string, Seen>()
-        /** When each printer's last job finished, as seen here: its plate's "Done 12:23 AM". */
-        const doneAt = new Map<string, number>()
+        /** Each printer's last job, kept across restarts: its duration, its plate's "Done 12:23 AM". */
+        const jobs = loadJobs()
         /** What changed since this printer's last report, as events and the print's activity. */
         const step = (e: Entry) => {
           const v = view(e)
           const stage = typeof e.link.raw.stg_cur === "number" ? e.link.raw.stg_cur : undefined
-          const out = track(seen.get(v.id), v, stage, Date.now())
+          const out = track(seen.get(v.id), v, stage, Date.now(), jobs.get(v.id))
           if (out.seen) {
             seen.set(v.id, out.seen)
           }
+          if (out.job) {
+            jobs.set(v.id, out.job)
+            saveJobs(jobs)
+          }
           for (const d of out.drafts) {
-            if (d.type === JobFinished.type) {
-              doneAt.set(v.id, Date.now())
-            }
             if (
               e.printer.jobOutcomes ||
               (d.type !== JobFinished.type && d.type !== JobFailed.type)
@@ -286,7 +288,10 @@ export class Printers extends Context.Service<
           view,
           card: SIM ? simCard : ftpsCard,
           holds,
-          doneAt: (id: string) => doneAt.get(id) ?? null,
+          doneAt: (v: View) => {
+            const job = jobs.get(v.id)
+            return job?.outcome === "finished" && job.file === v.file ? job.endedAt : null
+          },
           emit,
         }
       }),
@@ -364,9 +369,10 @@ const board = tool(
     Effect.gen(function* drawing() {
       const printers = yield* Printers
       return {
-        printers: printers.entries.map((e) =>
-          lineOf(printers.view(e), printers.doneAt(e.printer.id)),
-        ),
+        printers: printers.entries.map((e) => {
+          const v = printers.view(e)
+          return lineOf(v, printers.doneAt(v))
+        }),
       }
     }),
 )
@@ -904,10 +910,8 @@ const cardTool = (p: Printer) =>
       Effect.gen(function* drawing() {
         const printers = yield* Printers
         const e = yield* find(printers, p.id)
-        return {
-          line: lineOf(printers.view(e), printers.doneAt(e.printer.id)),
-          camera: { printer: p.id },
-        }
+        const v = printers.view(e)
+        return { line: lineOf(v, printers.doneAt(v)), camera: { printer: p.id } }
       }),
   )
 

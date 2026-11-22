@@ -16,8 +16,11 @@ Extensions view (⌘K, Extensions). Switch runs it on the first machine with wha
   `BAMBU_SERIAL`, `BAMBU_ACCESS_CODE`, and `NAME` for what to call it (rename sets it).
 - If another job tracker reports a printer's outcomes, set `JOB_OUTCOMES=off` in that
   printer's file to omit duplicate completion/failure events. Status, progress, errors,
-  cameras and Live Activities continue. Durations are reported only when this observer
-  saw the job start; connecting mid-print leaves the duration unknown.
+  cameras and Live Activities continue.
+- Each printer's last job is kept in the extension's folder (`jobs.json`), so a restart
+  mid-print keeps its start, its duration and its plate's "Done" time, and a job that ended
+  while it was down is still reported. A job already running when it first connects has no
+  duration.
 - Running uses one activity slot per printer. On reconnect, a running printer replaces
   that slot and an idle printer closes it, so observer restarts cannot strand old jobs.
 - The `bambu` CLI on `PATH` (or `$PRINTERS_BAMBU`) for slicing and sending.

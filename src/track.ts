@@ -1,5 +1,6 @@
 // What changed on a printer between two reports, as events: its state, a job starting, moving,
-// finishing or failing, filament running out, a new error, its slots. Pure, given the time.
+// finishing or failing, filament running out, a new error, its slots. Pure, given the time and the
+// job it kept from before a restart.
 import type { Draft } from "switch-ext-kit"
 
 import {
@@ -31,11 +32,25 @@ export interface Seen {
   readonly offlineSince: number | null
 }
 
+/**
+ * A printer's last job, kept across restarts (jobs.ts) as the Printers app kept it: its plate, when
+ * it started (null when it was running before this observer first saw it), and how and when it
+ * ended. A restart mid-print goes on with it, so its duration and its "Done 3:44 PM" hold.
+ */
+export interface Job {
+  readonly file: string
+  readonly startedAt: number | null
+  readonly endedAt: number | null
+  readonly outcome: "finished" | "failed" | "cancelled" | null
+}
+
 export interface Tracked {
   readonly seen: Seen | undefined
   readonly drafts: readonly Draft[]
   /** One activity slot per printer, stable across observer restarts. */
   readonly activity?: { readonly kind: "start" | "update" | "end"; readonly key: string }
+  /** The printer's job, when it started or ended. */
+  readonly job?: Job
 }
 
 export const shownSlots = (v: View) =>
@@ -53,22 +68,27 @@ const progressOf = (v: View) => ({
   endsAt: v.endsAt,
 })
 
-const ended = (v: View, file: string, startedAt: number | null, now: number): Draft => {
+/** A job's end: its event, and the job as it ended. */
+const ended = (v: View, file: string, startedAt: number | null, now: number) => {
   const w = { printer: v.id, name: v.name, file }
   if (v.state === "FINISH") {
     const minutes = startedAt === null ? null : Math.round((now - startedAt) / 60_000)
-    return JobFinished.make({ ...w, minutes })
+    const job: Job = { file, startedAt, endedAt: now, outcome: "finished" }
+    return { draft: JobFinished.make({ ...w, minutes }), job }
   }
   const reason = v.errors
     .filter((x) => x.code !== CANCELED)
     .map((x) => x.text ?? x.code)
     .join("; ")
-  return JobFailed.make({
+  const cancelled = v.errors.some((x) => x.code === CANCELED)
+  const job: Job = { file, startedAt, endedAt: now, outcome: cancelled ? "cancelled" : "failed" }
+  const draft = JobFailed.make({
     ...w,
-    cancelled: v.errors.some((x) => x.code === CANCELED),
+    cancelled,
     percent: v.percent,
     ...(reason === "" ? {} : { reason }),
   })
+  return { draft, job }
 }
 
 /** The job's events: started, moved, ended; and its activity. */
@@ -80,8 +100,10 @@ const jobOf = (before: Seen, v: View, now: number) => {
   const is = isActive(v.state)
   let { startedAt } = before
   let activity: Tracked["activity"]
+  let job: Job | undefined
   if (is && (!was || file !== before.file)) {
     startedAt = now
+    job = { file, startedAt, endedAt: null, outcome: null }
     drafts.push(JobStarted.make({ ...w, ...progressOf(v) }))
     activity = { kind: "start", key: v.id }
   } else if (is && (v.percent !== before.percent || v.phase !== before.phase)) {
@@ -89,11 +111,13 @@ const jobOf = (before: Seen, v: View, now: number) => {
     activity = { kind: "update", key: v.id }
   }
   if (was && !is) {
-    drafts.push(ended(v, file, startedAt, now))
+    const { draft, job: last } = ended(v, file, startedAt, now)
+    drafts.push(draft)
+    job = last
     activity = { kind: "end", key: v.id }
     startedAt = null
   }
-  return { drafts, file, startedAt, activity }
+  return { drafts, file, startedAt, activity, job }
 }
 
 /** Filament running out, new errors, the slots changing. */
@@ -120,15 +144,32 @@ const alertsOf = (before: Seen, v: View, stage: number | undefined, slots: strin
   return drafts
 }
 
+/**
+ * The first report is where it stands. A job it kept that's still the printer's plate goes on, or,
+ * when the printer says it finished or failed meanwhile, ends now. Nothing else is told.
+ */
+const first = (v: View, seen: Seen, kept: Job | undefined, now: number): Tracked => {
+  const activity = { kind: isActive(v.state) ? ("start" as const) : ("end" as const), key: v.id }
+  const open = kept?.endedAt === null && kept.file === seen.file ? kept : undefined
+  if (open && isActive(v.state)) {
+    return { seen: { ...seen, startedAt: open.startedAt }, drafts: [], activity }
+  }
+  if (open && (v.state === "FINISH" || v.state === "FAILED")) {
+    const { draft, job } = ended(v, open.file, open.startedAt, now)
+    return { seen, drafts: [draft], activity, job }
+  }
+  return { seen, drafts: [], activity }
+}
+
 export const track = (
   before: Seen | undefined,
   v: View,
   stage: number | undefined,
   now: number,
+  kept?: Job,
 ): Tracked => {
   const slots = JSON.stringify(shownSlots(v))
   const errors = new Set(v.errors.map((x) => x.code))
-  // The first report is where it stands: nothing to tell.
   if (!before) {
     if (!v.online) {
       return { seen: undefined, drafts: [] }
@@ -141,15 +182,11 @@ export const track = (
       stage,
       errors,
       slots,
-      // An already running job began before this observer connected.
+      // A job running unseen began before this observer connected.
       startedAt: null,
       offlineSince: null,
     }
-    return {
-      seen,
-      drafts: [],
-      activity: { kind: isActive(v.state) ? "start" : "end", key: v.id },
-    }
+    return first(v, seen, kept, now)
   }
   // A drop shorter than GONE_MS is a reconnect; the next session's report picks up from here.
   if (!v.online) {
@@ -182,5 +219,6 @@ export const track = (
     seen,
     drafts: [...changed, ...job.drafts, ...alertsOf(before, v, stage, slots)],
     ...(job.activity === undefined ? {} : { activity: job.activity }),
+    ...(job.job === undefined ? {} : { job: job.job }),
   }
 }
