@@ -132,7 +132,7 @@ const stateOf = (v: View, doneAt: number | null) => {
       return "Offline"
     }
     case "idle": {
-      throw new Error('Not implemented yet: "idle" case')
+      return "Idle"
     }
     default: {
       return "Idle"
