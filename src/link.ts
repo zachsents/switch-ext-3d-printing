@@ -192,6 +192,22 @@ export class Link {
     }
   }
 
+  /** Drops the session and dials again now: after its host moved. */
+  reconnect() {
+    if (this.closed) {
+      return
+    }
+    clearTimeout(this.retry)
+    this.retry = undefined
+    const { wire } = this
+    this.wire = undefined
+    this.connected = false
+    this.raw = {}
+    this.failures = 0
+    wire?.close()
+    this.open()
+  }
+
   close() {
     this.closed = true
     clearInterval(this.watchdog)

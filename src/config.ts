@@ -1,7 +1,7 @@
-// The printers the user set up: each is ID.env in the `bambu` CLI's folder (~/.config/bambu, or
-// $PRINTERS_CONFIG), with BAMBU_HOST, BAMBU_SERIAL and BAMBU_ACCESS_CODE, and NAME for what to call
-// it. Read fresh on every connect: the CLI rewrites the host when
-// DHCP moves a printer. The access code stays in this process; it goes nowhere but the printer.
+// The printers the user set up: each is ID.env in ~/.config/bambu (or $PRINTERS_CONFIG), with
+// BAMBU_HOST, BAMBU_SERIAL and BAMBU_ACCESS_CODE, and NAME for what to call it. Read fresh on every
+// connect: the host is rewritten when DHCP moves a printer (app.ts, rehome). The access code stays
+// in this process; it goes nowhere but the printer.
 import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
@@ -30,7 +30,7 @@ export interface Connection {
 }
 
 export interface Printer {
-  /** The CLI's name: p1p, p1p-2, p1s. */
+  /** Its env file's name. */
   readonly id: string
   readonly name: string
   readonly model: string
@@ -62,7 +62,7 @@ export const readConnection = (id: string): Connection => {
   return { host, serial, accessCode }
 }
 
-/** The printers set up in the CLI's folder, by id. */
+/** The printers set up, by id. */
 export const configured = (): Printer[] => {
   if (!existsSync(CONFIG_DIR)) {
     return []
@@ -90,17 +90,27 @@ export const configured = (): Printer[] => {
     })
 }
 
-/** Sets what a printer is called: NAME in its env file, its other lines as they were. */
-export const writeName = (id: string, name: string) => {
+/** Sets one key in a printer's env file, its other lines as they were. */
+const writeKey = (id: string, key: string, value: string) => {
   const file = path.join(CONFIG_DIR, `${id}.env`)
   const lines = readFileSync(file, "utf-8").replace(/\n$/u, "").split("\n")
-  const at = lines.findIndex((l) => /^\s*NAME\s*=/u.test(l))
+  const at = lines.findIndex((l) => l.includes("=") && l.split("=")[0]?.trim() === key)
   if (at === -1) {
-    lines.push(`NAME=${name}`)
+    lines.push(`${key}=${value}`)
   } else {
-    lines[at] = `NAME=${name}`
+    lines[at] = `${key}=${value}`
   }
   const tmp = `${file}.tmp`
   writeFileSync(tmp, `${lines.join("\n")}\n`, { mode: 0o600 })
   renameSync(tmp, file)
+}
+
+/** Sets what a printer is called: NAME in its env file. */
+export const writeName = (id: string, name: string) => {
+  writeKey(id, "NAME", name)
+}
+
+/** Sets where a printer is: BAMBU_HOST in its env file. */
+export const writeHost = (id: string, host: string) => {
+  writeKey(id, "BAMBU_HOST", host)
 }

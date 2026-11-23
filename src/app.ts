@@ -1,11 +1,11 @@
-// Bambu printers on the LAN as an extension: their state
-// from one MQTT session each, their cameras, filament, job control and sending a plate. Events for
-// what changes; a widget per printer in Switch's catalog: its line, filament and live camera.
+// Bambu printers on the LAN as an extension, the only thing that talks to them: one MQTT session and
+// one camera stream each, filament, job control, the whole print (check, plan, purge, upload, start),
+// timelapses, light keeping, job history and alerts. Events for what changes; a widget per printer in
+// Switch's catalog: its line, filament and live camera.
 //
 // Commands go to real printers only with PRINTERS_COMMANDS=on; PRINTERS_SIM=on runs two simulated
 // printers instead, which take every command.
-import { execFileSync } from "node:child_process"
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 import { Context, Effect, Layer, Schema } from "effect"
@@ -21,16 +21,27 @@ import {
 } from "switch-ext-kit"
 import type { Draft, WidgetDef } from "switch-ext-kit"
 import { Camera, tlsEye } from "./camera.ts"
-import { COMMANDS, configured, SIM, writeName } from "./config.ts"
+import { COMMANDS, configured, readConnection, SIM, writeHost, writeName } from "./config.ts"
 import type { Printer } from "./config.ts"
 import { presetFor } from "./filaments.ts"
 import { ftpsCard } from "./files.ts"
 import type { Card } from "./files.ts"
-import { loadJobs, saveJobs } from "./jobs.ts"
+import { history, loadJobs, record, saveJobs } from "./jobs.ts"
+import type { Job, JobTimelapse } from "./jobs.ts"
+import { libraryJson } from "./lib.ts"
 import { Link, mqttDial } from "./link.ts"
 import { noActivities } from "./live.ts"
 import type { LiveActivities, PrintActivity } from "./live.ts"
-import { filamentSetting, jobControl, projectFile, temps, unload } from "./payloads.ts"
+import {
+  extrude,
+  filamentSetting,
+  fromLibrary,
+  jobControl,
+  ledctrl,
+  printSpeed,
+  temps,
+  unload,
+} from "./payloads.ts"
 import { SIM_PRINTERS, simCard, simDial, simEye } from "./sim.ts"
 import {
   EVENTS,
@@ -44,9 +55,10 @@ import {
   SlotsChanged,
   StateChanged,
 } from "./events.ts"
-import { isActive, viewOf } from "./state.ts"
+import { isActive, slotsOf, viewOf } from "./state.ts"
 import type { Raw, View } from "./state.ts"
-import { bambu, makingTools } from "./making.ts"
+import { makingTools } from "./making.ts"
+import { INTERVAL_S, MIN_INTERVAL_S, plateStem, Recorders, timelapseRoot } from "./timelapse.ts"
 import { track } from "./track.ts"
 import type { Seen } from "./track.ts"
 import { lineOf, SWAP } from "./board.ts"
@@ -150,6 +162,36 @@ export interface Hold {
 
 const target = (raw: Raw, key: string) => (typeof raw[key] === "number" ? Math.round(raw[key]) : -1)
 
+/** What print sent, by printer: its job keeps the light on when it shows within the hour. */
+interface Sent {
+  readonly file: string
+  readonly at: number
+  readonly light: boolean
+}
+const SENT_MS = 3_600_000
+/** The chamber light is sent again at most this often while a job keeps it on. */
+const LIGHT_MS = 300_000
+/** Printers down this long are listened for by serial, at most every REHOME_MS. */
+const DOWN_MS = 600_000
+const REHOME_MS = 1_800_000
+
+/** Each printer's last print's spool signature (the CLI's last-spool-<id>.json), in the extension's folder. */
+const LAST_SPOOL = path.resolve("last-spool.json")
+const decodeSpools = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+)
+const lastSpools = (): Record<string, unknown> => {
+  if (!existsSync(LAST_SPOOL)) {
+    return {}
+  }
+  const read = decodeSpools(readFileSync(LAST_SPOOL, "utf-8"))
+  return read._tag === "Some" ? read.value : {}
+}
+const keepSpool = (id: string, signature: unknown) => {
+  writeFileSync(`${LAST_SPOOL}.tmp`, JSON.stringify({ ...lastSpools(), [id]: signature }))
+  renameSync(`${LAST_SPOOL}.tmp`, LAST_SPOOL)
+}
+
 export class Printers extends Context.Service<
   Printers,
   {
@@ -161,6 +203,10 @@ export class Printers extends Context.Service<
     /** When the plate a printer shows finished, as its kept job says; null if not seen. */
     readonly doneAt: (v: View) => number | null
     readonly emit: (draft: Draft) => void
+    /** Each printer's job, by printer id. */
+    readonly jobs: ReadonlyMap<string, Job>
+    readonly sent: Map<string, Sent>
+    readonly recorders: Recorders
   }
 >()("switch/printers/Printers") {
   static readonly layer = (options: { readonly activities?: LiveActivities } = {}) =>
@@ -176,9 +222,7 @@ export class Printers extends Context.Service<
 
         const entries: Entry[] = PRINTERS.map((printer) => {
           const link = new Link(printer.id, SIM ? simDial : mqttDial, COMMANDS)
-          const camera = new Camera(printer.id, SIM ? simEye : tlsEye, () =>
-            isActive(typeof link.raw.gcode_state === "string" ? link.raw.gcode_state : ""),
-          )
+          const camera = new Camera(printer.id, SIM ? simEye : tlsEye)
           return { printer, link, camera }
         })
         const holds = new Map<string, Hold>()
@@ -235,19 +279,49 @@ export class Printers extends Context.Service<
         }
 
         const seen = new Map<string, Seen>()
-        /** Each printer's last job, kept across restarts: its duration, its plate's "Done 12:23 AM". */
+        /** Each printer's job, kept across restarts: its duration, its plate's "Done 12:23 AM". */
         const jobs = loadJobs()
-        /** What changed since this printer's last report, as events and the print's activity. */
+        const sent = new Map<string, Sent>()
+        const setJob = (j: Job) => {
+          jobs.set(j.printer, j)
+          saveJobs(jobs)
+          record(j)
+        }
+
+        /** A job's chamber light kept on while it runs. */
+        const keepLight = (e: Entry) => {
+          const j = jobs.get(e.printer.id)
+          const now = Date.now()
+          if (j?.keepLight !== true || j.endedAt !== null || !e.link.online()) {
+            return
+          }
+          const v = view(e)
+          if (isActive(v.state) && v.light === false && now - j.lightAt > LIGHT_MS) {
+            const lit = { ...j, lightAt: now }
+            jobs.set(lit.printer, lit)
+            saveJobs(jobs)
+            e.link.send(ledctrl(e.link.nextSeq(), true)).catch(ignore)
+          }
+        }
+
+        /** What changed since this printer's last report, as events, its job and the print's activity. */
         const step = (e: Entry) => {
           const v = view(e)
+          const now = Date.now()
           const stage = typeof e.link.raw.stg_cur === "number" ? e.link.raw.stg_cur : undefined
-          const out = track(seen.get(v.id), v, stage, Date.now(), jobs.get(v.id))
+          const kept = jobs.get(v.id)
+          const out = track(seen.get(v.id), v, stage, now, kept, e.link.seenAt || now)
           if (out.seen) {
             seen.set(v.id, out.seen)
           }
-          if (out.job) {
-            jobs.set(v.id, out.job)
-            saveJobs(jobs)
+          for (const j of out.jobs) {
+            const s = sent.get(v.id)
+            const ours =
+              jobs.get(v.id)?.id !== j.id &&
+              s !== undefined &&
+              plateStem(s.file) === j.file &&
+              now - s.at < SENT_MS
+            setJob(ours ? { ...j, keepLight: s.light } : j)
           }
           for (const d of out.drafts) {
             if (
@@ -263,23 +337,99 @@ export class Printers extends Context.Service<
           }
         }
 
+        const recorders = new Recorders({
+          raw: (id) => {
+            const e = entries.find((x) => x.printer.id === id)
+            return e?.link.online() === true ? e.link.raw : undefined
+          },
+          camera: (id) => {
+            const e = entries.find((x) => x.printer.id === id)
+            if (!e) {
+              throw new Error(`No printer ${id}`)
+            }
+            return e.camera
+          },
+          name: (id) => entries.find((x) => x.printer.id === id)?.printer.name ?? id,
+          job: (id) => {
+            const j = jobs.get(id)
+            return j?.endedAt === null ? j.id : undefined
+          },
+          timelapse: (printer: string, job: string, tl: JobTimelapse) => {
+            const j = jobs.get(printer)
+            if (j?.id === job) {
+              setJob({ ...j, timelapse: tl })
+              return
+            }
+            const old = history().find((x) => x.id === job)
+            if (old) {
+              record({ ...old, timelapse: tl })
+            }
+          },
+          emit,
+        })
+        recorders.resume()
+
+        /** Down printers heard at a new address (DHCP moved them) get their env file's host rewritten. */
+        const downSince = new Map<string, number>()
+        let rehomedAt = 0
+        const rehome = async () => {
+          const now = Date.now()
+          const down = entries.filter((e) => now - (downSince.get(e.printer.id) ?? now) > DOWN_MS)
+          if (SIM || down.length === 0 || now - rehomedAt < REHOME_MS) {
+            return
+          }
+          rehomedAt = now
+          const serials = new Map(down.map((e) => [readConnection(e.printer.id).serial, e]))
+          const heard = Schema.decodeUnknownSync(
+            Schema.fromJsonString(Schema.Record(Schema.String, Schema.String)),
+          )(
+            await libraryJson(
+              ["listen", ...[...serials.keys()].flatMap((x) => ["--serial", x])],
+              60_000,
+            ),
+          )
+          for (const [serial, host] of Object.entries(heard)) {
+            const e = serials.get(serial)
+            if (e && readConnection(e.printer.id).host !== host) {
+              console.error(
+                `${e.printer.id}: moved to ${host} (heard by serial); rewrote its env file`,
+              )
+              writeHost(e.printer.id, host)
+              e.link.reconnect()
+            }
+          }
+        }
+
         for (const e of entries) {
           e.link.subscribe(() => {
-            e.camera.poke()
             step(e)
             keep(e)
+            keepLight(e)
           })
         }
         const keeper = setInterval(() => {
           for (const e of entries) {
             keep(e)
+            keepLight(e)
           }
         }, 2000)
         // Offline only counts after GONE_MS, which no report marks.
         const ticker = setInterval(() => {
           for (const e of entries) {
             step(e)
+            if (e.link.online()) {
+              downSince.delete(e.printer.id)
+            } else if (!downSince.has(e.printer.id)) {
+              downSince.set(e.printer.id, Date.now())
+            }
           }
+          void (async () => {
+            try {
+              await rehome()
+            } catch (error) {
+              console.error(`rehome: ${String(error)}`)
+            }
+          })()
         }, 5000)
         yield* Effect.addFinalizer(() =>
           Effect.sync(() => {
@@ -301,6 +451,9 @@ export class Printers extends Context.Service<
             return job?.outcome === "finished" && job.file === v.file ? job.endedAt : null
           },
           emit,
+          jobs,
+          sent,
+          recorders,
         }
       }),
     )
@@ -519,170 +672,508 @@ const camera = tool(
     }),
 )
 
-interface Filament {
-  readonly id: number
-  readonly type: string
-  readonly color: string
+// ── Printing ──
+
+const loadedFields = Schema.Struct({
+  tray_info_idx: Schema.String,
+  tray_type: Schema.String,
+  tray_color: Schema.String,
+  nozzle_temp_min: Schema.Finite,
+  nozzle_temp_max: Schema.Finite,
+})
+const wire = Schema.Union([
+  Schema.String,
+  Schema.Finite,
+  Schema.Boolean,
+  Schema.Array(Schema.Unknown),
+])
+const planned = Schema.Struct({
+  printer: Schema.String,
+  check: Schema.Array(Schema.String),
+  errors: Schema.Finite,
+  setting: Schema.NullOr(
+    Schema.Struct({
+      ams_id: Schema.Finite,
+      tray_id: Schema.Finite,
+      where: Schema.String,
+      fields: loadedFields,
+      tray: Schema.NullOr(Schema.Finite),
+    }),
+  ),
+  plan: Schema.String,
+  notes: Schema.Array(Schema.String),
+  purge: Schema.Boolean,
+  signature: Schema.Unknown,
+  send: Schema.String,
+  payload: Schema.Struct({
+    print: Schema.StructWithRest(Schema.Struct({ command: Schema.String }), [
+      Schema.Record(Schema.String, wire),
+    ]),
+  }),
+})
+const decodePlan = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Union([Schema.Struct({ error: Schema.String }), planned])),
+)
+type Planned = typeof planned.Type
+
+/** The library's print planning: the CLI's `bambu print` up to the send (lib/bambu.py plan). */
+const planPrint = async (request: Record<string, unknown>): Promise<Planned> => {
+  const said = decodePlan(await libraryJson(["plan"], 5 * 60_000, JSON.stringify(request)))
+  if ("error" in said) {
+    throw new Error(said.error)
+  }
+  return said
 }
 
-/** The filaments a plate uses, from its slice_info.config. */
-const filamentsOf = (file: string): Filament[] => {
-  let info = ""
-  try {
-    info = execFileSync("unzip", ["-p", file, "Metadata/slice_info.config"], {
-      encoding: "utf-8",
-      maxBuffer: 16_000_000,
-    })
-  } catch {
-    return []
-  }
-  return [...info.matchAll(/<filament\b[^>]*>/gu)].flatMap((m) => {
-    const [tag] = m
-    const id = Number(/\bid="(?<v>\d+)"/u.exec(tag)?.groups?.v)
-    const type = /\btype="(?<v>[^"]+)"/u.exec(tag)?.groups?.v
-    const color = /\bcolor="#?(?<v>[0-9A-Fa-f]{6})/u.exec(tag)?.groups?.v
-    return Number.isFinite(id) && type !== undefined
-      ? [{ id, type, color: (color ?? "").toUpperCase() }]
-      : []
-  })
+const text = (x: unknown) => (typeof x === "string" ? x : undefined)
+
+/** Whether the printer reports what a loaded setting set: that type and color there (the CLI's loaded_took). */
+const loadedTook = (raw: Raw, setting: NonNullable<Planned["setting"]>) => {
+  const want = setting.fields
+  const vt: Record<string, unknown> =
+    typeof raw.vt_tray === "object" && raw.vt_tray !== null ? { ...raw.vt_tray } : {}
+  const slot = slotsOf(raw).find((x) => x.tray === setting.tray)
+  const type = setting.tray === null ? text(vt.tray_type) : slot?.type
+  const color = setting.tray === null ? text(vt.tray_color)?.slice(0, 6).toUpperCase() : slot?.color
+  return (
+    type !== undefined &&
+    type !== "" &&
+    (want.tray_type.split(";")[0] ?? "").toUpperCase() === type.toUpperCase() &&
+    color === want.tray_color.slice(0, 6)
+  )
 }
 
-/** Which tray each sliced filament runs from: [] for the external spool, as the CLI plans it. */
-const plan = (v: View, filaments: readonly Filament[], picked: readonly string[] | undefined) => {
-  if (v.slots.length === 0 || picked?.[0]?.toLowerCase() === "ext") {
-    if (filaments.length > 1) {
-      throw new Error(`${v.name} has one spool; the plate uses ${filaments.length} filaments`)
-    }
-    const want = filaments[0]?.type
-    if (want !== undefined && v.spool !== undefined && v.spool.type !== want) {
-      throw new Error(`${v.name} has ${v.spool.type} loaded; the plate wants ${want}`)
-    }
-    return []
+/** Sends a command and checks its reply, when one came. */
+const sendChecked = async (link: Link, request: Parameters<Link["send"]>[0]) => {
+  const reply = await link.send(request)
+  if (reply && !reply.ok) {
+    throw new Error(`Refused${reply.reason === undefined ? "" : `: ${reply.reason}`}`)
   }
-  const top = Math.max(0, ...filaments.map((f) => f.id))
-  const mapping: number[] = Array.from({ length: top }, () => -1)
-  for (const [i, f] of filaments.entries()) {
-    const name = picked?.[i]?.toUpperCase()
-    const slot =
-      name === undefined
-        ? (v.slots.find((s) => s.type === f.type && s.color === f.color) ??
-          v.slots.find((s) => s.type === f.type))
-        : v.slots.find((s) => s.slot === name)
-    if (slot?.loaded !== true) {
-      throw new Error(name === undefined ? `No slot holds ${f.type}` : `${name} is empty`)
-    }
-    if (slot.type !== f.type) {
-      throw new Error(
-        `${slot.slot} holds ${slot.type ?? "nothing set"}; filament ${f.id} is ${f.type}`,
-      )
-    }
-    mapping[f.id - 1] = slot.tray
-  }
-  return mapping
 }
 
-/** The CLI's check, upload and start: a big file over weak Wi-Fi takes minutes. */
-const CLI_MS = 15 * 60_000
+/** How long a sent job may take to show on the printer. */
+const SHOW_MS = 240_000
 
 /**
- * A plate through the CLI, as by hand: `bambu check` (it refuses on an error), the AMS plan, the
- * full purge after a spool change, the upload, the start and the timelapse recorder.
+ * The slice's one filament was just put on: the printer is told so, from the slice, and must report
+ * it within 15 s (the CLI's print --loaded). What it set, as a note.
  */
-const viaCli = async (
-  id: string,
-  file: string,
-  options: {
-    readonly slots?: readonly string[]
-    readonly level: boolean
-    readonly dryRun: boolean
+const putLoaded = async (e: Entry, setting: NonNullable<Planned["setting"]>) => {
+  const { link } = e
+  const what = `${setting.fields.tray_type} #${setting.fields.tray_color.slice(0, 6)}`
+  await link.send(
+    fromLibrary(link.nextSeq(), "print", {
+      command: "ams_filament_setting",
+      ams_id: setting.ams_id,
+      tray_id: setting.tray_id,
+      ...setting.fields,
+    }),
+  )
+  if (!(await link.waitFor((r) => loadedTook(r, setting), 15_000))) {
+    throw new Error(
+      `not sending to ${e.printer.name}: it didn't report its ${setting.where} as ${what} within 15 s of being set; check it with status`,
+    )
+  }
+  return `loaded: set ${e.printer.name}'s ${setting.where} to ${what}, what's on it now`
+}
+
+/**
+ * Uploads the plate (skipped when a same-size copy is on the card already, as the CLI's upload) and
+ * starts it with the library's project_file. What was sent is kept, for its job's light.
+ */
+const sendPlate = async (
+  printers: typeof Printers.Service,
+  e: Entry,
+  plate: {
+    readonly file: string
+    readonly send: string
+    readonly payload: Planned["payload"]
+    readonly light: boolean
   },
 ) => {
-  const args = ["-p", id, "print", file]
-  const { slots } = options
-  if (slots !== undefined && slots.length > 1) {
-    args.push("--ams-map", slots.join(","))
-  } else if (slots?.[0] !== undefined) {
-    args.push("--ams", slots[0])
+  const { link } = e
+  const { size } = statSync(plate.send)
+  const there = await printers.card.list(e.printer.id)
+  if (!there.some((f) => f.name === plate.file && f.size === size)) {
+    await printers.card.upload(e.printer.id, plate.send, plate.file)
   }
-  if (!options.level) {
-    args.push("--no-level")
-  }
-  if (options.dryRun) {
-    args.push("--dry-run")
-  }
-  const said = await bambu(args, CLI_MS)
-  return said.slice(-20)
+  printers.sent.set(e.printer.id, { file: plate.file, at: Date.now(), light: plate.light })
+  await sendChecked(link, fromLibrary(link.nextSeq(), "print", plate.payload.print))
 }
+
+/** Every printer's report for the library to plan against, or why there's none. */
+const statesOf = (printers: typeof Printers.Service) =>
+  Object.fromEntries(
+    printers.entries.map((x) => [
+      x.printer.id,
+      { state: x.link.online() ? x.link.raw : "offline", model: x.printer.model },
+    ]),
+  )
+
+/** print's input as the library's plan takes it. */
+const printRequest = (
+  input: {
+    readonly slots?: readonly string[]
+    readonly force?: boolean
+    readonly quickStart?: boolean
+    readonly dryRun?: boolean
+    readonly level?: boolean
+    readonly vibration?: boolean
+  },
+  file: string,
+) => ({
+  file,
+  slots: input.slots ?? [],
+  force: input.force ?? false,
+  quick_start: input.quickStart ?? false,
+  dry_run: input.dryRun ?? false,
+  level: input.level ?? true,
+  vibration: input.vibration ?? false,
+  last: lastSpools(),
+})
+
+/** The print's timelapse, started; a note when it says something, or couldn't start. */
+const startTimelapse = (
+  printers: typeof Printers.Service,
+  e: Entry,
+  name: string,
+  interval: number,
+) =>
+  Effect.promise(async () => {
+    try {
+      const rec = await printers.recorders.start(e.printer.id, name, interval)
+      return rec.note === undefined ? [] : [rec.note]
+    } catch (error) {
+      return [
+        `timelapse: couldn't start a recording for ${e.printer.name} (${String(error)}); the print itself was sent`,
+      ]
+    }
+  })
 
 const print = tool(
   "print",
   {
     description:
-      "Send a sliced plate (.gcode.3mf on this machine) to a printer and start it, through the bambu CLI: its pre-print check, AMS plan, purge after a spool change, upload and timelapse recorder. Only on a cleared bed, and only when the user wants it printed. `slots` picks the AMS slot for each filament in order (A1, A3) or ext; by default each filament takes a slot holding its type. `dryRun` runs the check and the plan and sends nothing.",
+      "Send a sliced plate (.gcode.3mf on this machine) to a printer, or \"auto\" (an idle printer with the plate's filament loaded), and start it: the pre-print check (it refuses on errors unless force), the AMS plan, the full purge after a spool change (quickStart skips it), the upload, the start, a timelapse (timelapse false skips it; interval seconds, default 15), then waits until the printer shows the job. Only on a cleared bed, and only when the user wants it printed. slots: the AMS slot per filament in order (A1, A3) or ext; by default each filament takes the slot holding its type and color. loaded: the slice's one filament was just put on; that spool or slot is set from the slice first. light: keep the chamber light on through the job. level (default true), vibration: calibrations. dryRun runs the check and the plan and sends nothing.",
     input: Schema.Struct({
       printer: Schema.String,
       file: Schema.String,
       slots: Schema.optionalKey(Schema.Array(Schema.String)),
-      /** Bed leveling first: on by default. */
       level: Schema.optionalKey(Schema.Boolean),
+      vibration: Schema.optionalKey(Schema.Boolean),
       dryRun: Schema.optionalKey(Schema.Boolean),
+      loaded: Schema.optionalKey(Schema.Boolean),
+      quickStart: Schema.optionalKey(Schema.Boolean),
+      force: Schema.optionalKey(Schema.Boolean),
+      timelapse: Schema.optionalKey(Schema.Boolean),
+      interval: Schema.optionalKey(Schema.Finite),
+      light: Schema.optionalKey(Schema.Boolean),
     }),
   },
   (input) =>
     Effect.gen(function* printing() {
       const printers = yield* Printers
-      const e = yield* find(printers, input.printer)
-      const { link } = e
-      const file = input.file.replace(/^~\//u, `${homedir()}/`)
+      const file = path.resolve(input.file.replace(/^~\//u, `${homedir()}/`))
       const name = path.basename(file)
       const dryRun = input.dryRun ?? false
+      const interval = input.interval ?? INTERVAL_S
       if (!name.endsWith(".gcode.3mf") || !existsSync(file)) {
         return yield* Effect.fail(new Error(`No plate at ${input.file}`))
+      }
+      if (interval < MIN_INTERVAL_S) {
+        return yield* Effect.fail(new Error(`A timelapse interval is at least ${MIN_INTERVAL_S} s`))
+      }
+      const chosen =
+        input.printer.trim().toLowerCase() === "auto"
+          ? "auto"
+          : (yield* find(printers, input.printer)).printer.id
+      const states = () => statesOf(printers)
+      const request = printRequest(input, file)
+      const first = yield* attempt(
+        async () =>
+          await planPrint({
+            ...request,
+            printer: chosen,
+            printers: states(),
+            loaded: input.loaded ?? false,
+            check: true,
+          }),
+      )
+      const e = yield* find(printers, first.printer)
+      const { link } = e
+      if (dryRun) {
+        return {
+          printer: printers.view(e),
+          job: null,
+          plan: first.plan,
+          notes: first.notes,
+          check: first.check,
+          purge: first.purge,
+          payload: first.payload,
+        }
+      }
+      if (!link.commands) {
+        return yield* Effect.fail(new Error("Commands are off"))
       }
       if (!link.online()) {
         return yield* Effect.fail(new Error(`${e.printer.name} is offline`))
       }
-      if (!link.commands && !dryRun) {
-        return yield* Effect.fail(new Error("Commands are off"))
-      }
-      const v = printers.view(e)
-      if (isActive(v.state)) {
-        return yield* Effect.fail(new Error(`${e.printer.name} is busy`))
-      }
-      const level = input.level ?? true
-      if (!SIM) {
-        const said = yield* attempt(
+      const notes = [...first.notes]
+      let plan = first
+      const { setting } = first
+      if (setting) {
+        notes.push(yield* attempt(async () => await putLoaded(e, setting)))
+        plan = yield* attempt(
           async () =>
-            await viaCli(e.printer.id, file, {
-              ...(input.slots === undefined ? {} : { slots: input.slots }),
-              level,
-              dryRun,
+            await planPrint({
+              ...request,
+              printer: e.printer.id,
+              printers: states(),
+              loaded: false,
+              check: false,
             }),
         )
-        if (!dryRun) {
-          yield* attempt(async () => await link.waitFor((r) => isActive(stateOf(r)), 60_000))
-        }
-        return { printer: printers.view(e), said }
+        notes.push(...plan.notes)
       }
-      // The simulator has no CLI: the same requests, sent directly.
-      const mapping = yield* Effect.try({
-        try: () => plan(v, filamentsOf(file), input.slots),
-        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
-      })
-      if (dryRun) {
-        return { printer: v, said: [`dry run: ${name} fits ${e.printer.name}; nothing sent`] }
+      const { send, payload, signature } = plan
+      if (send !== file) {
+        notes.push(
+          `${e.printer.name}: the spool changed since its last print (or isn't known), so this print runs the full 100 mm purge (skip with quickStart)`,
+        )
       }
       yield* attempt(async () => {
-        const { size } = statSync(file)
-        const there = await printers.card.list(e.printer.id)
-        if (!there.some((f) => f.name === name && f.size === size)) {
-          await printers.card.upload(e.printer.id, file, name)
-        }
-        const md5 = new Bun.CryptoHasher("md5").update(readFileSync(file)).digest("hex")
-        const request = projectFile(link.nextSeq(), { name, md5 }, { mapping, level })
-        await sendAndConfirm(link, request, (r) => isActive(stateOf(r)), 60_000)
+        await sendPlate(printers, e, { file: name, send, payload, light: input.light ?? false })
+        keepSpool(e.printer.id, signature)
       })
-      return { printer: printers.view(e), said: [] }
+      if (input.timelapse !== false) {
+        notes.push(...(yield* startTimelapse(printers, e, name, interval)))
+      }
+      const shown = yield* attempt(
+        async () => await link.waitFor((r) => isActive(stateOf(r)), SHOW_MS),
+      )
+      if (!shown) {
+        notes.push(`${e.printer.name} doesn't show the job yet`)
+      }
+      const job = printers.jobs.get(e.printer.id)
+      return {
+        printer: printers.view(e),
+        job: job?.endedAt === null && job.file === plateStem(name) ? job.id : null,
+        plan: plan.plan,
+        notes,
+        check: first.check,
+        purge: plan.purge,
+      }
+    }),
+)
+
+const speed = tool(
+  "speed",
+  {
+    description:
+      "The running job's speed: silent (about half speed, much quieter, for overnight near sleepers), standard, sport, ludicrous. It lasts until the job ends.",
+    input: Schema.Struct({
+      printer: Schema.String,
+      level: Schema.Literals(["silent", "standard", "sport", "ludicrous"]),
+    }),
+  },
+  (input) =>
+    Effect.gen(function* speeding() {
+      const printers = yield* Printers
+      const e = yield* commandable(printers, input.printer)
+      const { link } = e
+      const state = stateOf(link.raw)
+      if (!isActive(state)) {
+        return yield* Effect.fail(
+          new Error(
+            `${e.printer.name} has no running job (${state}); start the print, then set its speed`,
+          ),
+        )
+      }
+      yield* attempt(async () => {
+        await sendChecked(link, printSpeed(link.nextSeq(), input.level))
+      })
+      return printers.view(e)
+    }),
+)
+
+const light = tool(
+  "light",
+  {
+    description: "The chamber light. On for prints after dark, so the camera and timelapse see.",
+    input: Schema.Struct({ printer: Schema.String, on: Schema.Boolean }),
+  },
+  (input) =>
+    Effect.gen(function* lighting() {
+      const printers = yield* Printers
+      const e = yield* commandable(printers, input.printer)
+      const { link } = e
+      yield* attempt(async () => {
+        await sendAndConfirm(
+          link,
+          ledctrl(link.nextSeq(), input.on),
+          (r) => viewOf(e.printer, r, true, new Map(), Date.now()).light === input.on,
+          10_000,
+        )
+      })
+      return printers.view(e)
+    }),
+)
+
+const extrudeTool = tool(
+  "extrude",
+  {
+    description: "Push filament through a hot nozzle (190 °C or more), in mm.",
+    input: Schema.Struct({ printer: Schema.String, mm: Schema.Finite }),
+  },
+  (input) =>
+    Effect.gen(function* extruding() {
+      const printers = yield* Printers
+      const e = yield* commandable(printers, input.printer)
+      const { link } = e
+      const v = printers.view(e)
+      if (v.nozzle < MIN_EXTRUDE_C) {
+        return yield* Effect.fail(
+          new Error(`${e.printer.name}: nozzle is ${v.nozzle} C; heat it first`),
+        )
+      }
+      yield* attempt(async () => {
+        await sendChecked(link, extrude(link.nextSeq(), input.mm, 150))
+      })
+      return printers.view(e)
+    }),
+)
+
+/** The printer's own timelapse's local name: video_2026-10-20_21-30-05.avi -> 2026-10-20_2130_<id>_native.avi. */
+const nativeName = (printer: string, remote: string) => {
+  const m = /(?<day>\d{4}-\d{2}-\d{2})_(?<h>\d{2})-(?<min>\d{2})/u.exec(remote)?.groups
+  return m?.day === undefined
+    ? `${printer}_native_${remote}`
+    : `${m.day}_${m.h ?? ""}${m.min ?? ""}_${printer}_native${path.extname(remote)}`
+}
+
+const fetchNative = async (printers: typeof Printers.Service, e: Entry, all: boolean) => {
+  const { id } = e.printer
+  const there = await printers.card.list(id, "/timelapse")
+  const videos = there
+    .map((f) => f.name)
+    .filter((f) => /\.(?:avi|mp4)$/iu.test(f))
+    .toSorted()
+  if (videos.length === 0) {
+    throw new Error(`${e.printer.name} has no timelapses in /timelapse on its card`)
+  }
+  const root = timelapseRoot()
+  const wanted = (all ? videos : videos.slice(-1)).map((remote) => ({
+    remote,
+    dest: path.join(root, nativeName(id, remote)),
+  }))
+  const had = wanted.filter((w) => existsSync(w.dest)).map((w) => w.dest)
+  const saved: string[] = []
+  // One at a time, as the CLI fetched them.
+  const fetchEach = async (left: readonly { remote: string; dest: string }[]): Promise<void> => {
+    const [w, ...rest] = left
+    if (w !== undefined) {
+      await printers.card.download(id, `/timelapse/${w.remote}`, w.dest)
+      saved.push(w.dest)
+      await fetchEach(rest)
+    }
+  }
+  await fetchEach(wanted.filter((w) => !had.includes(w.dest)))
+  return { saved, had }
+}
+
+const timelapse = tool(
+  "timelapse",
+  {
+    description:
+      "Every print records a camera timelapse (mp4 plus a .jpg preview). list: what's recording, frames folders not yet a video, and the newest videos. latest: a recording's newest frame. start/stop: a printer's recording by hand (stop still encodes what it has). fetch: the printer's own timelapse from its card (all: every one). encode: a frames folder from list into its video.",
+    input: Schema.Struct({
+      action: Schema.Literals(["list", "latest", "fetch", "start", "stop", "encode"]),
+      printer: Schema.optionalKey(Schema.String),
+      all: Schema.optionalKey(Schema.Boolean),
+      frames: Schema.optionalKey(Schema.String),
+    }),
+  },
+  (input) =>
+    Effect.gen(function* filming() {
+      const printers = yield* Printers
+      const { recorders } = printers
+      const { action, frames } = input
+      if (action === "list") {
+        return recorders.list()
+      }
+      if (action === "encode") {
+        if (frames === undefined) {
+          return yield* Effect.fail(new Error("encode needs frames"))
+        }
+        return yield* attempt(async () => await recorders.encode(frames))
+      }
+      if (input.printer === undefined) {
+        return yield* Effect.fail(new Error(`${action} needs a printer`))
+      }
+      const e = yield* find(printers, input.printer)
+      const { id } = e.printer
+      if (action === "latest") {
+        return yield* Effect.try({
+          try: () => recorders.latest(id),
+          catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+        })
+      }
+      if (action === "start") {
+        const job = e.link.raw.subtask_name
+        const source = typeof job === "string" && job !== "" ? job : "print"
+        return yield* attempt(async () => await recorders.start(id, source, INTERVAL_S))
+      }
+      if (action === "stop") {
+        const rec = yield* attempt(async () => await recorders.stop(id))
+        if (!rec) {
+          return yield* Effect.fail(new Error(`${e.printer.name} has no recording`))
+        }
+        return { stopped: rec.printer, video: rec.out }
+      }
+      return yield* attempt(async () => await fetchNative(printers, e, input.all === true))
+    }),
+)
+
+const jobsTool = tool(
+  "jobs",
+  {
+    description:
+      "Printing history, newest first: each job's printer, plate, start and end, outcome (finished, failed, cancelled, stopped, lost, running), reason, layers, minutes and timelapse (recording, encoding, saved with its video and preview, failed, none).",
+    readOnly: true,
+    input: Schema.Struct({
+      printer: Schema.optionalKey(Schema.String),
+      limit: Schema.optionalKey(Schema.Finite),
+    }),
+  },
+  (input) =>
+    Effect.gen(function* listing() {
+      const printers = yield* Printers
+      const only =
+        input.printer === undefined ? undefined : (yield* find(printers, input.printer)).printer.id
+      const now = Date.now()
+      const all = history().filter((j) => only === undefined || j.printer === only)
+      return {
+        jobs: all.slice(0, input.limit ?? all.length).map((j) => {
+          const e = printers.entries.find((x) => x.printer.id === j.printer)
+          const live =
+            j.endedAt === null && e?.link.online() === true ? printers.view(e) : undefined
+          return {
+            id: j.id,
+            printer: j.printer,
+            name: j.name,
+            file: j.file,
+            startedAt: j.startedAt,
+            endedAt: j.endedAt,
+            outcome: j.outcome,
+            ...(j.reason === undefined ? {} : { reason: j.reason }),
+            layer: live?.layer ?? j.layer,
+            layers: live?.layers ?? j.layers,
+            minutes:
+              j.startedAt === null ? null : Math.round(((j.endedAt ?? now) - j.startedAt) / 60_000),
+            timelapse: j.timelapse,
+          }
+        }),
+      }
     }),
 )
 
@@ -996,7 +1487,7 @@ export const printersApp = defineApp<Printers>({
   instructions: [
     "Bambu printers on the LAN, as status lists them (model, external spool, AMS slots A1-A4). Name the printer whenever you report on one.",
     "Designing a part to print: read rules (design) first.",
-    "Printing: inspect STLs made elsewhere and pick the bed face; slice; read the summary (time, filament_g, objects, bed_C) and every check WARNING, and say the time; confirm the printer's bed is clear (FINISH means the last part is likely still on it); print (dryRun first to see the plan); wait until printing. Every print records a timelapse (timelapse list).",
+    "Printing: inspect STLs made elsewhere and pick the bed face; slice; read the summary (time, filament_g, objects, bed_C) and every check WARNING, and say the time; confirm the printer's bed is clear (FINISH means the last part is likely still on it); print (dryRun first to see the plan); wait until printing. Every print records a timelapse (timelapse list; timelapse_saved says where); jobs is the history.",
     "Swapping the external spool: heat to the old filament's temperature, unload, have the new one fed in, extrude until it runs clean, then set_filament.",
     "After a spool swap, set_filament on that slot or the external spool right away: print matches the plate against what the printer reports.",
   ].join("\n"),
@@ -1015,6 +1506,11 @@ export const printersApp = defineApp<Printers>({
     hold,
     unloadTool,
     rename,
+    speed,
+    light,
+    extrudeTool,
+    timelapse,
+    jobsTool,
     ...makingTools,
     ...cards,
   ],

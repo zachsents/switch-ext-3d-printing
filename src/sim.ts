@@ -1,5 +1,6 @@
 // A simulated P1P and P1S, for exercising the command tools without hardware: they take the same
-// MQTT requests (pushall, pause, resume, stop, ams_filament_setting, project_file) and answer with
+// MQTT requests (pushall, pause, resume, stop, ams_filament_setting, project_file, ledctrl,
+// print_speed, gcode_line) and answer with
 // the same replies and status pushes. A plate on the simulated card prints in about 30 s; one whose
 // name has "runout" in it runs out of filament halfway.
 import { copyFileSync, mkdtempSync, statSync } from "node:fs"
@@ -174,6 +175,16 @@ class SimPrinter {
         this.start(section, body)
         return
       }
+      case "ledctrl": {
+        this.push({ lights_report: [{ node: "chamber_light", mode: body.led_mode }] })
+        this.reply(section, body, true)
+        return
+      }
+      case "print_speed": {
+        this.push({ spd_lvl: Number(body.param) })
+        this.reply(section, body, true)
+        return
+      }
       case "gcode_line": {
         this.gcode(String(body.param))
         this.reply(section, body, true)
@@ -328,21 +339,35 @@ export const simDial: Dial = (id, events) => {
   }
 }
 
-export const simEye: Eye = (_id, _signal, _onFrame, onEnd) => {
-  setTimeout(() => {
-    onEnd("No camera")
-  }, 10)
+/** A plain grey 64x36 picture, about once a second, so recording runs as it does on a printer. */
+const GREY = Buffer.from(
+  "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAA0JCgsKCA0LCgsODg0PEyAVExISEyccHhcgLikxMC4pLSwzOko+MzZGNywtQFdBRkxOUlNSMj5aYVpQYEpRUk//2wBDAQ4ODhMREyYVFSZPNS01T09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0//wAARCAAkAEADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDiaKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooA/9k=",
+  "base64",
+)
+
+export const simEye: Eye = (_id, signal, onFrame) => {
+  const tick = setInterval(() => {
+    onFrame(GREY)
+  }, 1000)
+  signal.addEventListener("abort", () => {
+    clearInterval(tick)
+  })
 }
 
 const cardDir = mkdtempSync(path.join(tmpdir(), "printers-sim-"))
 
 export const simCard: Card = {
-  list: async (id) =>
-    await Promise.resolve([...sim(id).card.values()].map(({ local: _, ...f }) => f)),
+  list: async (id, folder = "/") =>
+    await Promise.resolve(
+      folder === "/" ? [...sim(id).card.values()].map(({ local: _, ...f }) => f) : [],
+    ),
   upload: async (id, local, name) => {
     const copy = path.join(cardDir, `${id}-${name}`)
     copyFileSync(local, copy)
     sim(id).card.set(name, { name, size: statSync(copy).size, at: Date.now(), local: copy })
     await Promise.resolve()
+  },
+  download: async (id, remote) => {
+    await Promise.reject(new Error(`${id} has no ${remote}`))
   },
 }

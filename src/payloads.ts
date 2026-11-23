@@ -1,8 +1,7 @@
-// The MQTT requests a P1 takes (device/SERIAL/request), as Bambu Studio and the `bambu` CLI send
-// them. Each carries its own
-// sequence_id, which the printer echoes in its reply.
+// The MQTT requests a P1 takes (device/SERIAL/request), as Bambu Studio and the `bambu` CLI sent
+// them. Each carries its own sequence_id, which the printer echoes in its reply.
 
-type Field = string | number | boolean | readonly unknown[]
+export type Field = string | number | boolean | readonly unknown[]
 
 export interface Request {
   readonly section: "print" | "system" | "pushing"
@@ -78,50 +77,45 @@ export const filamentSetting = (
   }
 }
 
+/** The chamber light, as the CLI's `light` sent it. */
+export const ledctrl = (seq: string, on: boolean): Request => ({
+  section: "system",
+  body: {
+    sequence_id: seq,
+    command: "ledctrl",
+    led_node: "chamber_light",
+    led_mode: on ? "on" : "off",
+    led_on_time: 500,
+    led_off_time: 500,
+    loop_times: 0,
+    interval_time: 0,
+  },
+})
+
+/** The printer's own speed modes; silent runs at about half speed and much quieter. */
+export const SPEED_LEVELS = { silent: 1, standard: 2, sport: 3, ludicrous: 4 } as const
+
+/** The running job's speed level, as the CLI's `speed`: from the next move until the job ends. */
+export const printSpeed = (seq: string, level: keyof typeof SPEED_LEVELS): Request => ({
+  section: "print",
+  body: { sequence_id: seq, command: "print_speed", param: String(SPEED_LEVELS[level]) },
+})
+
+/** Pushes `mm` of filament through a hot nozzle at `speed` mm/min, as the CLI's `extrude`. */
+export const extrude = (seq: string, mm: number, speed: number) =>
+  gcode(seq, ["M83", `G1 E${mm} F${speed}`])
+
+type Payload = Readonly<Record<string, Field>>
+
 /**
- * Starts plate 1 of /name on the card, as the CLI's project_file_payload. `mapping` is, per sliced
- * filament, the global tray it runs from (-1 unused); empty prints from the external spool.
+ * A command the library built (a section and its body, its sequence_id "0") with this session's
+ * sequence id: plan's project_file and the loaded spool's ams_filament_setting.
  */
-export const projectFile = (
+export const fromLibrary = (
   seq: string,
-  file: { readonly name: string; readonly md5: string },
-  options: { readonly mapping: readonly number[]; readonly level: boolean },
-): Request => {
-  const useAms = options.mapping.length > 0
-  return {
-    section: "print",
-    body: {
-      sequence_id: seq,
-      command: "project_file",
-      param: "Metadata/plate_1.gcode",
-      url: `ftp:///${file.name}`,
-      md5: file.md5,
-      subtask_name: file.name.replace(/\.gcode\.3mf$/u, ""),
-      project_id: "0",
-      profile_id: "0",
-      task_id: "0",
-      subtask_id: "0",
-      timelapse: false,
-      bed_type: "auto",
-      bed_leveling: options.level,
-      bed_levelling: options.level,
-      flow_cali: false,
-      vibration_cali: false,
-      layer_inspect: false,
-      use_ams: useAms,
-      ams_mapping: options.mapping,
-      ...(useAms
-        ? {
-            ams_mapping2: options.mapping.map((t) =>
-              t >= 0
-                ? { ams_id: Math.floor(t / 4), slot_id: t % 4 }
-                : { ams_id: 255, slot_id: 255 },
-            ),
-          }
-        : {}),
-    },
-  }
-}
+  section: Request["section"],
+  body: Payload & { readonly command: string },
+): Request => ({ section, body: { ...body, sequence_id: seq } })
 
 /**
  * The camera's 80-byte login (TLS on port 6000), like the CLI's grab_frame: four little-endian

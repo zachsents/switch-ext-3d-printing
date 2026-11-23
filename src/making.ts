@@ -1,43 +1,18 @@
-// Slicing and the rest of a print's life, through the `bambu` CLI the user installs (on PATH, or
-// $PRINTERS_BAMBU): slicing with its presets, the pre-print check, the AMS plan, the purge after a
-// spool change, the timelapse recorder. And general printability rules.
+// Slicing, the pre-print check, heat soaks and STL orientations, through the extension's library
+// (lib/bambu.py), with its presets. Listening for printers on the LAN. And general printability rules.
 import { readFileSync } from "node:fs"
 import path from "node:path"
 import { Effect, Schema } from "effect"
 
 import { tool } from "switch-ext-kit"
-import { COMMANDS } from "./config.ts"
-
-export const CLI = process.env.PRINTERS_BAMBU ?? "bambu"
+import { library } from "./lib.ts"
 
 const RULES = path.join(import.meta.dir, "rules.md")
-
-/** Runs the CLI; its last lines, or an error with its last line when it fails. */
-export const bambu = async (args: readonly string[], ms: number): Promise<string[]> => {
-  const proc = Bun.spawn([CLI, ...args], { stdout: "pipe", stderr: "pipe" })
-  const timer = setTimeout(() => {
-    proc.kill()
-  }, ms)
-  const [out, err, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ])
-  clearTimeout(timer)
-  const said = `${out}\n${err}`
-    .split("\n")
-    .map((l) => l.trimEnd())
-    .filter((l) => l !== "")
-  if (code !== 0) {
-    throw new Error(said.slice(-12).join("\n") || `bambu ${args[0] ?? ""} exited ${code}`)
-  }
-  return said
-}
 
 const run = (args: readonly string[], ms: number) =>
   Effect.tryPromise({
     try: async () => {
-      const said = await bambu(args, ms)
+      const said = await library(args, ms)
       return { said: said.slice(-60) }
     },
     catch: (error) => (error instanceof Error ? error : new Error(String(error))),
@@ -53,7 +28,7 @@ const slice = tool(
   "slice",
   {
     description:
-      "Slice STLs onto one plate (.gcode.3mf, plus a top-down .png) with the CLI's presets, then run the pre-print check. Parts: 'part.stl', 'part.stl:3' for copies, 'part.stl@2' on filament 2, 'base.stl+logo.stl@2' for one object of two parts. filament: pla, petg, tpu, tpu95, tpu90, tpu85, abs, asa or an exact preset, in filament order; color: RRGGBB in filament order. Multi-filament plates are made for the P1S. Read the summary (time, filament_g, objects, bed_C) and every check WARNING before sending.",
+      "Slice STLs onto one plate (.gcode.3mf, plus a top-down .png) with the library's presets, then run the pre-print check. Parts: 'part.stl', 'part.stl:3' for copies, 'part.stl@2' on filament 2, 'base.stl+logo.stl@2' for one object of two parts. filament: pla, petg, tpu, tpu95, tpu90, tpu85, abs, asa or an exact preset, in filament order; color: RRGGBB in filament order. Multi-filament plates are made for the P1S. Read the summary (time, filament_g, objects, bed_C) and every check WARNING before sending.",
     input: Schema.Struct({
       output: Schema.String,
       parts: Schema.Array(Schema.String),
@@ -62,6 +37,21 @@ const slice = tool(
       machine: Schema.optionalKey(Schema.Literals(["p1p", "p1s"])),
       supports: Schema.optionalKey(Schema.Literals(["bed", "everywhere"])),
       brim: Schema.optionalKey(Schema.Finite),
+      /** outer (default), inner (inside holes only), both (rings, frames), ears (sharp corners), auto. */
+      brimType: Schema.optionalKey(Schema.Literals(["outer", "inner", "both", "ears", "auto"])),
+      /** Gap between brim and part on the bed, mm; 0 fuses it to the part, for parts that lift. */
+      brimGap: Schema.optionalKey(Schema.Finite),
+      /** Where each object goes instead of arranging them, one per object in order (copies count): "X,Y" mm (footprint center; 0,0 front-left, +y back) or center, back, front, left, right, back-left, back-right, front-left, front-right. */
+      place: Schema.optionalKey(Schema.Array(Schema.String)),
+      /** Purge volume (mm³) for every filament change; default from the colors. */
+      purge: Schema.optionalKey(Schema.Finite),
+      /** Multi-filament plates get a prime tower unless this is false. */
+      primeTower: Schema.optionalKey(Schema.Boolean),
+      /** Process preset; default 0.20mm Standard for the machine. */
+      process: Schema.optionalKey(Schema.String),
+      plate: Schema.optionalKey(Schema.Literals(["textured", "cool", "engineering", "hot"])),
+      /** Let the slicer auto-orient; off, parts print as exported. */
+      orient: Schema.optionalKey(Schema.Boolean),
       layer: Schema.optionalKey(Schema.Finite),
       infill: Schema.optionalKey(Schema.Finite),
       walls: Schema.optionalKey(Schema.Finite),
@@ -88,6 +78,14 @@ const slice = tool(
       ...(input.machine === undefined ? [] : ["--machine", input.machine]),
       ...(input.supports === undefined ? [] : ["--supports", input.supports]),
       ...(input.brim === undefined ? [] : ["--brim", String(input.brim)]),
+      ...(input.brimType === undefined ? [] : ["--brim-type", input.brimType]),
+      ...(input.brimGap === undefined ? [] : ["--brim-gap", String(input.brimGap)]),
+      ...each("--place", input.place),
+      ...(input.purge === undefined ? [] : ["--purge", String(input.purge)]),
+      ...(input.primeTower === false ? ["--no-prime-tower"] : []),
+      ...(input.process === undefined ? [] : ["--process", input.process]),
+      ...(input.plate === undefined ? [] : ["--plate", input.plate]),
+      ...(input.orient === true ? ["--orient"] : []),
       ...(input.layer === undefined ? [] : ["--layer", String(input.layer)]),
       ...(input.infill === undefined ? [] : ["--infill", String(input.infill)]),
       ...(input.walls === undefined ? [] : ["--walls", String(input.walls)]),
@@ -191,75 +189,14 @@ const inspect = tool(
     ),
 )
 
-const timelapse = tool(
-  "timelapse",
-  {
-    description:
-      "Every print records a camera timelapse. list: what's recording, unfinished frame folders and the newest videos (mp4 plus a .jpg preview). latest: the running recorder's newest frame for a printer. fetch: the printer's own timelapse from its card (all: every one). start/stop: a recorder by hand. encode: a dead recorder's frames folder into the video.",
-    input: Schema.Struct({
-      action: Schema.Literals(["list", "latest", "fetch", "start", "stop", "encode"]),
-      printer: Schema.optionalKey(Schema.String),
-      all: Schema.optionalKey(Schema.Boolean),
-      frames: Schema.optionalKey(Schema.String),
-    }),
-  },
-  (input) => {
-    const on = input.printer === undefined ? [] : ["-p", input.printer]
-    if (input.action === "encode") {
-      return input.frames === undefined
-        ? Effect.fail(new Error("encode needs frames"))
-        : run(["timelapse", "encode", input.frames], 30 * MINUTE)
-    }
-    return run(
-      ["timelapse", input.action, ...on, ...(input.all === true ? ["--all"] : [])],
-      10 * MINUTE,
-    )
-  },
-)
-
 const discover = tool(
   "discover",
   {
     description:
-      "Listen for Bambu printers' LAN broadcasts: IP, serial, model, firmware, and which configured printer each is. Adding one is the user's (`bambu add`, the access code at a hidden prompt).",
+      "Listen for Bambu printers' LAN broadcasts: IP, serial, model, firmware, and which configured printer each is. Adding one is the user's: an <id>.env in the printers' folder with BAMBU_HOST, BAMBU_SERIAL, BAMBU_ACCESS_CODE (from its screen) and NAME, then the extension restarted.",
     readOnly: true,
   },
   () => run(["discover"], MINUTE),
-)
-
-/** The CLI's own printer commands, only when commands are on. */
-const device = (args: readonly string[]) =>
-  COMMANDS ? run(args, 2 * MINUTE) : Effect.fail(new Error("Commands are off"))
-
-const speed = tool(
-  "speed",
-  {
-    description:
-      "The running job's speed: silent (about half speed, much quieter, for overnight near sleepers), standard, sport, ludicrous.",
-    input: Schema.Struct({
-      printer: Schema.String,
-      level: Schema.Literals(["silent", "standard", "sport", "ludicrous"]),
-    }),
-  },
-  (input) => device(["-p", input.printer, "speed", input.level]),
-)
-
-const light = tool(
-  "light",
-  {
-    description: "The chamber light. On for prints after dark, so the camera and timelapse see.",
-    input: Schema.Struct({ printer: Schema.String, on: Schema.Boolean }),
-  },
-  (input) => device(["-p", input.printer, "light", input.on ? "on" : "off"]),
-)
-
-const extrude = tool(
-  "extrude",
-  {
-    description: "Push filament through a hot nozzle (190 °C or more), in mm.",
-    input: Schema.Struct({ printer: Schema.String, mm: Schema.Finite }),
-  },
-  (input) => device(["-p", input.printer, "extrude", String(input.mm)]),
 )
 
 const SECTIONS = {
@@ -291,16 +228,4 @@ const rules = tool(
     }),
 )
 
-export const makingTools = [
-  slice,
-  plate,
-  check,
-  soak,
-  inspect,
-  timelapse,
-  discover,
-  speed,
-  light,
-  extrude,
-  rules,
-]
+export const makingTools = [slice, plate, check, soak, inspect, discover, rules]
