@@ -7,3 +7,5 @@ artifacts/
 *.tsbuildinfo
 .DS_Store
 .experiments/
+__pycache__/
+*.pyc
