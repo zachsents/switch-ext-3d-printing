@@ -1053,7 +1053,7 @@ const extrudeTool = tool(
   (input) =>
     Effect.gen(function* extruding() {
       const printers = yield* Printers
-      const e = yield* commandable(printers, input.printer)
+      const e = yield* takesGcode(printers, input.printer)
       const { link } = e
       const v = printers.view(e)
       if (v.nozzle < MIN_EXTRUDE_C) {
@@ -1221,6 +1221,23 @@ const commandable = (printers: typeof Printers.Service, name: string) =>
     return e
   })
 
+/** Printers that run only Bambu's own routines: no hand-sent G-code (heat, extrude, unload) reaches them. */
+const STOCK_ONLY = new Set(["P2S", "H2C"])
+
+/** A printer that takes hand-sent G-code: one of STOCK_ONLY refuses it. */
+const takesGcode = (printers: typeof Printers.Service, name: string) =>
+  Effect.gen(function* checking() {
+    const e = yield* commandable(printers, name)
+    if (STOCK_ONLY.has(e.printer.model)) {
+      return yield* Effect.fail(
+        new Error(
+          `${e.printer.name} (${e.printer.model}) runs only Bambu's own routines; heat, extrude and unload it on its screen`,
+        ),
+      )
+    }
+    return e
+  })
+
 const heat = tool(
   "heat",
   {
@@ -1236,7 +1253,7 @@ const heat = tool(
   (input) =>
     Effect.gen(function* heating() {
       const printers = yield* Printers
-      const e = yield* commandable(printers, input.printer)
+      const e = yield* takesGcode(printers, input.printer)
       const { link } = e
       const { id } = e.printer
       const nozzle = Math.round(input.nozzle)
@@ -1319,7 +1336,7 @@ const unloadTool = tool(
   (input) =>
     Effect.gen(function* unloading() {
       const printers = yield* Printers
-      const e = yield* commandable(printers, input.printer)
+      const e = yield* takesGcode(printers, input.printer)
       const { link } = e
       const v = printers.view(e)
       if (isActive(v.state)) {

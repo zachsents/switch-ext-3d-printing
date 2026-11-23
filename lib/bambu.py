@@ -45,9 +45,16 @@ CONFIG = Path(os.environ.get("PRINTERS_CONFIG") or Path.home() / ".config/bambu"
 CACHE = Path(os.environ.get("PRINTERS_WORK") or Path(tempfile.gettempdir()) / "printers")
 STUDIO = Path(os.environ.get("BAMBU_STUDIO", "/Applications/BambuStudio.app/Contents/MacOS/BambuStudio"))
 PROFILES = STUDIO.parent.parent / "Resources/profiles/BBL"
-MACHINES = {"p1p": "Bambu Lab P1P 0.4 nozzle", "p1s": "Bambu Lab P1S 0.4 nozzle"}  # `slice --machine`
+MACHINES = {"p1p": "Bambu Lab P1P 0.4 nozzle", "p1s": "Bambu Lab P1S 0.4 nozzle",  # `slice --machine`
+            "p2s": "Bambu Lab P2S 0.4 nozzle", "h2c": "Bambu Lab H2C 0.4 nozzle"}
+NOZZLES = ("0.2", "0.4", "0.6", "0.8")  # `slice --nozzle`: the machine preset for that hotend ("Bambu Lab P2S 0.6 nozzle")
 MACHINE = os.environ.get("BAMBU_MACHINE", MACHINES["p1p"])  # `slice --machine` switches it (use_machine)
 MODEL = MACHINE.split()[2]  # "P1P"
+NOZZLE = "0.4"
+# Stock-only models: their slices use Bambu's machine and process presets as Bambu ships them, with every G-code
+# routine untouched (start, leveling, the H2C's hotend-rack changes, AMS changes, end): no trimmed prime, no removed
+# vibration check, no soak dwells written in. Zach's rule for the P2S and the H2C; they were calibrated on the printer.
+STOCK_MODELS = {"P2S", "H2C"}
 # Bambu names some P1S presets "@BBL P1S 0.4 nozzle" and shares the rest with the X1C, so {m} tries each in turn.
 PRESET_MODELS = {"P1S": ["P1S", "P1S 0.4 nozzle", "X1C"]}
 PROCESS_MODEL = {"P1S": "X1C"}  # "0.20mm Standard @BBL X1C" is the P1S's own default process
@@ -72,8 +79,18 @@ def load_preset(kind: str, name: str) -> dict:
 
 
 def machine_templates(name: str) -> dict:
-    """Printer G-code (start, end, layer change...) lives in separate '<name> template *.json' files."""
-    return {k: v for path in sorted((PROFILES / "machine").glob(f"{name} template *.json")) for k, v in json.loads(path.read_text()).items() if k not in ("name", "instantiation")}
+    """Printer G-code (start, end, layer change...) lives in separate template files that the preset names in its
+    `include` list (inherited: the H2C 0.6 preset uses the 0.4's), else '<name> template *.json' beside it."""
+    included = load_preset("machine", name).get("include")
+    if isinstance(included, str):
+        included = json.loads(included.replace("'", '"'))
+    paths = [PROFILES / "machine" / f"{n}.json" for n in included] if included else sorted((PROFILES / "machine").glob(f"{name} template *.json"))
+    return {k: v for path in paths for k, v in json.loads(path.read_text()).items() if k not in ("name", "instantiation")}
+
+
+def stock() -> bool:
+    """Whether the current machine slices only with Bambu's own presets and G-code (STOCK_MODELS)."""
+    return MODEL in STOCK_MODELS
 
 
 FLUSH = ("M109 S250 ;set nozzle to common flush temp\nM106 P1 S0\nG92 E0\nG1 E50 F200\nM400\n"
@@ -86,8 +103,14 @@ def machine_profile(full_start: bool) -> dict:
     """Flattened machine preset. By default the start G-code skips the 100 mm purge and the vibration fast check
     (saves ~5 min per plate); `full_start` keeps Bambu's routine."""
     m = {**load_preset("machine", MACHINE), **machine_templates(MACHINE), "from": "system", "is_custom_defined": "0"}
+    m.pop("include", None)
+    if len(m.get("nozzle_diameter") or []) > 1 and not m.get("extruder_nozzle_stats"):
+        # A two-extruder machine (the H2C) needs its nozzle inventory, which Studio's GUI syncs from the printer; its CLI
+        # has none and refuses the plate ("No valid nozzle found"). One standard nozzle per extruder, as the GUI assumes
+        # before a sync. Not G-code: the start, rack and AMS routines stay Bambu's.
+        m["extruder_nozzle_stats"] = [f"{t}#1" for t in m.get("default_nozzle_volume_type") or ["Standard"] * len(m["nozzle_diameter"])]
     start = m["machine_start_gcode"]
-    if not full_start:
+    if not full_start and not stock():
         if start.count(FLUSH) == 1 and len(FAST_CHECK.findall(start)) == 1:
             m["machine_start_gcode"] = FAST_CHECK.sub(";===== vibration fast check removed =====\n", start.replace(FLUSH, SHORT_PRIME))
         else:
@@ -95,15 +118,33 @@ def machine_profile(full_start: bool) -> dict:
     return m
 
 
-def use_machine(name: str):
-    """Slices for printer model `name` (a MACHINES key) from here on."""
-    global MACHINE, MODEL  # REVIEW: the slice target is process-wide; one CLI run slices for one machine
-    MACHINE, MODEL = MACHINES[name], MACHINES[name].split()[2]
+def use_machine(name: str, nozzle: str | None = None):
+    """Slices for printer model `name` (a MACHINES key) from here on, with a `nozzle` mm hotend (default 0.4)."""
+    global MACHINE, MODEL, NOZZLE  # REVIEW: the slice target is process-wide; one CLI run slices for one machine
+    machine = MACHINES[name] if not nozzle else MACHINES[name].replace(" 0.4 nozzle", f" {nozzle} nozzle")
+    if not (PROFILES / "machine" / f"{machine}.json").exists():
+        sys.exit(f"Bambu Studio has no {machine!r} preset (nozzles for {name}: "
+                 + ", ".join(n for n in NOZZLES if (PROFILES / "machine" / f"{MACHINES[name].replace(' 0.4 nozzle', f' {n} nozzle')}.json").exists()) + ")")
+    MACHINE, MODEL, NOZZLE = machine, machine.split()[2], nozzle or "0.4"
+
+
+def preset_models() -> list[str]:
+    """The model names presets for this machine are filed under, most specific first: "P2S 0.6 nozzle", then "P2S"."""
+    base = PRESET_MODELS.get(MODEL, [MODEL])
+    return [f"{MODEL} {NOZZLE} nozzle", *base] if NOZZLE != "0.4" else base
+
+
+def default_process() -> str:
+    """The process preset a slice starts from: Bambu's own default for the machine (its default_print_profile, e.g.
+    "0.20mm Standard @BBL P2S", "0.30mm Standard @BBL H2C 0.6 nozzle"); the P1S's is filed under the X1C."""
+    if stock() or NOZZLE != "0.4":
+        return load_preset("machine", MACHINE)["default_print_profile"]
+    return f"0.20mm Standard @BBL {PROCESS_MODEL.get(MODEL, MODEL)}"
 
 
 def filament_profile(choice: str, overrides: list[str] | None = None) -> dict:
     """A filament preset by alias or exact name, for the current MACHINE, with KEY=VALUE overrides."""
-    names = list(dict.fromkeys(n.format(m=m) for n in FILAMENTS.get(choice.lower(), [choice]) for m in PRESET_MODELS.get(MODEL, [MODEL])))
+    names = list(dict.fromkeys(n.format(m=m) for n in FILAMENTS.get(choice.lower(), [choice]) for m in preset_models()))
     for name in names:
         if (PROFILES / "filament" / f"{name}.json").exists():
             f = {**load_preset("filament", name), "from": "system", "is_custom_defined": "0"}
@@ -259,7 +300,7 @@ def process_profile(args, kinds: list[str | None], support_type: str = "tree(aut
     the plate), then --set (which always wins). `big` (a part over BIG_FOOTPRINT_MM) makes the default brim 8 mm;
     a TPU-only plate, and a PLA/PETG plate whose parts are all `flat` (the flat-contact rule), get no brim and no skirt
     unless --brim asks for one."""
-    p = {**load_preset("process", args.process or f"0.20mm Standard @BBL {PROCESS_MODEL.get(MODEL, MODEL)}"),
+    p = {**load_preset("process", args.process or default_process()),
          "from": "system", "is_custom_defined": "0", "curr_bed_type": PLATES[args.plate], **PROCESS_DEFAULTS}
     if args.walls:
         p["wall_loops"] = str(args.walls)
@@ -612,7 +653,9 @@ def slice_cmd(args) -> None:
         sys.exit("--brim-gap and --brim-type need a brim; drop --brim 0")
     if args.brim_gap is not None and args.brim_gap < 0:
         sys.exit("--brim-gap can't be negative (0 fuses the brim to the part)")
-    use_machine(args.machine or ("p1s" if count > 1 else "p1p"))
+    use_machine(args.machine or ("p1s" if count > 1 else "p1p"), args.nozzle)
+    if stock() and args.soak:
+        sys.exit(f"the {MODEL} slices with Bambu's own G-code only, so no soak is written in; drop --soak")
     out = Path(args.out).expanduser().resolve()
     big = [obj[0][0] for obj in objects if footprint_mm(obj) > BIG_FOOTPRINT_MM]
     filaments, explicit = slice_filaments(args, count, bool(big))
@@ -695,7 +738,7 @@ def info(path: Path, expected: int | None = None) -> dict:
                **({"filament_g_each": [f"{g:.2f}" for g in grams], "colors": grab(r"; filament_colour = ([^\n]+)"),
                    "printer_model": grab(r"; printer_model = ([^\n]+)")} if len(grams) > 1 else {}),
                "layers": grab(r"total layer number: (\d+)"), "filament": grab(r"; filament_type = ([^\n]+)"), "plate": grab(r"; curr_bed_type = ([^\n]+)"),
-               "bed_C": grab(r"\nM140 S(\d+)"), **({"soak_min": soak} if (soak := soaked_minutes(head)) else {}),
+               "bed_C": grab(r"\n[ \t]*M140 S(\d+)"), **({"soak_min": soak} if (soak := soaked_minutes(head)) else {}),
                "nozzle_C": grab(r"; nozzle_temperature = (\d+)"),
                "objects_on_plate_1": objects, "placed": [f"{o['name']} at {o['x']:g},{o['y']:g}" for o in at], "plates": len(plates),
                "preview": str(path.with_suffix("").with_suffix(".png"))}
@@ -758,6 +801,8 @@ def soak_plate(path: Path, minutes: int, out: Path | None = None) -> tuple[int, 
     if not 0 <= minutes <= MAX_SOAK_MIN:
         sys.exit(f"a soak is 0 to {MAX_SOAK_MIN} minutes")
     out = out or path
+    if (model := sliced_model(path)) in STOCK_MODELS:
+        sys.exit(f"{path.name} is sliced for the {model}, which runs Bambu's own G-code only; no soak is written in")
     with zipfile.ZipFile(path) as z:
         names = z.namelist()
         plates = [n for n in names if re.fullmatch(r"Metadata/plate_\d+\.gcode", n)]
@@ -1087,7 +1132,7 @@ def first_layer_warnings(cfg: dict, head: str) -> list[str]:
     out, kind, plate = [], material(cfg.get("filament_type", "")), cfg.get("curr_bed_type", "?")
     nozzle = int(float(cfg.get("nozzle_temperature_initial_layer", 0)))
     bed_key = PLATE_TEMP_KEYS.get(plate, "") + "_initial_layer"
-    bed_cmd = re.search(r"^M190 S(\d+)", head, re.M) or re.search(r"^M140 S(\d+)", head, re.M)
+    bed_cmd = re.search(r"^[ \t]*M190 S(\d+)", head, re.M) or re.search(r"^[ \t]*M140 S(\d+)", head, re.M)
     bed = int(bed_cmd[1]) if bed_cmd else int(float(cfg.get(bed_key, 0)))
     if not kind:
         return [f"unknown filament type {cfg.get('filament_type')!r}; first-layer temperatures not checked"]
@@ -1339,7 +1384,7 @@ def inspect_cmd(args):
 
 # ================================================================== printer config (one env file per printer)
 
-MODELS = {"C11": "P1P", "C12": "P1S", "N1": "A1 mini", "N2S": "A1", "BL-P001": "X1C", "BL-P002": "X1", "C13": "X1E", "O1D": "H2D"}
+MODELS = {"C11": "P1P", "C12": "P1S", "N1": "A1 mini", "N2S": "A1", "BL-P001": "X1C", "BL-P002": "X1", "C13": "X1E", "O1D": "H2D", "O1C2": "H2C", "N7": "P2S"}
 
 
 class PrinterError(Exception):
@@ -1724,6 +1769,9 @@ def plan_cmd(args):
     if name not in printers:
         raise PrinterError(f"no printer {name}")
     state, here = printers[name]["state"], printers[name].get("model")
+    if here in STOCK_MODELS and sliced_model(path) != here:
+        raise PrinterError(f"not sending to {name}: it's a {here}, which runs only plates sliced with Bambu's own {here} presets, "
+                           f"and this one was sliced for the {sliced_model(path) or 'unknown printer'}; re-slice with machine {here.lower()}")
     if isinstance(state, str):
         raise PrinterError(f"{name}: {state}")
     if state.get("gcode_state") in ("RUNNING", "PREPARE", "PAUSE"):
@@ -1752,11 +1800,12 @@ def plan_cmd(args):
     if model and here and model != here:
         notes.append(f"sliced for the {model} but {name} is a {here}; it runs (same G-code family), but re-slice with "
                      f"machine {here.lower()} for its own fan and start settings")
-    purge = not req.get("quick_start") and spool_changed((req.get("last") or {}).get(name), plan["signature"])
+    purge = here not in STOCK_MODELS and not req.get("quick_start") and spool_changed((req.get("last") or {}).get(name), plan["signature"])
     send = path
     if purge and not req.get("dry_run") and not setting and (purged := with_full_purge(path)):
         send = purged
-    payload = project_file_payload(path.name, hashlib.md5(send.read_bytes()).hexdigest(), plan, False, req.get("level", True), bool(req.get("vibration")))
+    payload = project_file_payload(path.name, hashlib.md5(send.read_bytes()).hexdigest(), plan, False, req.get("level", True),
+                                  bool(req.get("vibration")) and here not in STOCK_MODELS)  # no calibration asked of a stock-only printer
     print(json.dumps({"printer": name, "check": checked.getvalue().splitlines(), "errors": errors, "setting": setting, "plan": describe_plan(plan),
                       "notes": notes, "purge": purge, "signature": plan["signature"], "send": str(send), "payload": payload}))
 
@@ -1858,7 +1907,9 @@ def main():
                    "filament 2, 3... in order (the last one repeats)")
     s.add_argument("--color", action="append", type=hex_color, help="filament color as hex (FFFFFF), repeat in filament order; "
                    "print matches it to an AMS tray, and multi-filament purges are sized from it")
-    s.add_argument("--machine", choices=MACHINES, help="printer model to slice for (default p1p, or p1s when the plate uses more than one filament)")
+    s.add_argument("--machine", choices=MACHINES, help="printer model to slice for (default p1p, or p1s when the plate uses more than one filament); "
+                   "p2s and h2c slice with Bambu's stock presets and G-code only")
+    s.add_argument("--nozzle", choices=NOZZLES, help="the hotend's nozzle in mm (default 0.4): Bambu's machine and process presets for it")
     s.add_argument("--support-filament", type=int, metavar="N", help="filament number for the support bodies")
     s.add_argument("--support-interface-filament", type=int, metavar="N", help="filament number for support interfaces only "
                    "(e.g. PETG under PLA for a clean release; no z gap when the materials differ)")

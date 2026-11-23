@@ -28,13 +28,16 @@ const slice = tool(
   "slice",
   {
     description:
-      "Slice STLs onto one plate (.gcode.3mf, plus a top-down .png) with the library's presets, then run the pre-print check. Parts: 'part.stl', 'part.stl:3' for copies, 'part.stl@2' on filament 2, 'base.stl+logo.stl@2' for one object of two parts. filament: pla, petg, tpu, tpu95, tpu90, tpu85, abs, asa or an exact preset, in filament order; color: RRGGBB in filament order. Multi-filament plates are made for the P1S. Read the summary (time, filament_g, objects, bed_C) and every check WARNING before sending.",
+      "Slice STLs onto one plate (.gcode.3mf, plus a top-down .png) with the library's presets, then run the pre-print check. Parts: 'part.stl', 'part.stl:3' for copies, 'part.stl@2' on filament 2, 'base.stl+logo.stl@2' for one object of two parts. filament: pla, petg, tpu, tpu95, tpu90, tpu85, abs, asa or an exact preset, in filament order; color: RRGGBB in filament order. Multi-filament plates are made for the P1S unless machine says otherwise (p2s, h2c). Read the summary (time, filament_g, objects, bed_C) and every check WARNING before sending.",
     input: Schema.Struct({
       output: Schema.String,
       parts: Schema.Array(Schema.String),
       filament: Schema.optionalKey(Schema.Array(Schema.String)),
       color: Schema.optionalKey(Schema.Array(Schema.String)),
-      machine: Schema.optionalKey(Schema.Literals(["p1p", "p1s"])),
+      /** p2s and h2c slice with Bambu's stock machine and process presets and G-code only (no trimmed start, no soak). */
+      machine: Schema.optionalKey(Schema.Literals(["p1p", "p1s", "p2s", "h2c"])),
+      /** The hotend's nozzle, mm (default 0.4): Bambu's presets for it. */
+      nozzle: Schema.optionalKey(Schema.Literals(["0.2", "0.4", "0.6", "0.8"])),
       supports: Schema.optionalKey(Schema.Literals(["bed", "everywhere"])),
       brim: Schema.optionalKey(Schema.Finite),
       /** outer (default), inner (inside holes only), both (rings, frames), ears (sharp corners), auto. */
@@ -76,6 +79,7 @@ const slice = tool(
       ...each("--filament", input.filament),
       ...each("--color", input.color),
       ...(input.machine === undefined ? [] : ["--machine", input.machine]),
+      ...(input.nozzle === undefined ? [] : ["--nozzle", input.nozzle]),
       ...(input.supports === undefined ? [] : ["--supports", input.supports]),
       ...(input.brim === undefined ? [] : ["--brim", String(input.brim)]),
       ...(input.brimType === undefined ? [] : ["--brim-type", input.brimType]),
