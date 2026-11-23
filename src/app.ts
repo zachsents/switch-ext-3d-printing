@@ -61,6 +61,7 @@ import type { Raw, View } from "./state.ts"
 import { makingTools } from "./making.ts"
 import { INTERVAL_S, MIN_INTERVAL_S, plateStem, Recorders, timelapseRoot } from "./timelapse.ts"
 import { track } from "./track.ts"
+import { plateRoute, tunnelUpload } from "./tunnel.ts"
 import type { Seen } from "./track.ts"
 import { lineOf, SWAP } from "./board.ts"
 
@@ -790,8 +791,9 @@ const putLoaded = async (e: Entry, setting: NonNullable<Planned["setting"]>) => 
 }
 
 /**
- * Uploads the plate (skipped when a same-size copy is on the card already, as the CLI's upload) and
- * starts it with the library's project_file. What was sent is kept, for its job's light.
+ * Uploads the plate and starts it with the library's project_file: an H2 or P2S into its internal
+ * storage over the :6000 tunnel, started from brtc://emmc/; any other to its card over FTPS (skipped
+ * when a same-size copy is there already, as the CLI's upload), started from ftp:///. What was sent is kept, for its job's light.
  */
 const sendPlate = async (
   printers: typeof Printers.Service,
@@ -805,10 +807,15 @@ const sendPlate = async (
   },
 ) => {
   const { link } = e
-  const { size } = statSync(plate.send)
-  const there = await printers.card.list(e.printer.id)
-  if (!there.some((f) => f.name === plate.file && f.size === size)) {
-    await printers.card.upload(e.printer.id, plate.send, plate.file)
+  const route = plateRoute(link.raw, plate.file)
+  if (route.via === "tunnel") {
+    await tunnelUpload(readConnection(e.printer.id), plate.send, plate.file)
+  } else {
+    const { size } = statSync(plate.send)
+    const there = await printers.card.list(e.printer.id)
+    if (!there.some((f) => f.name === plate.file && f.size === size)) {
+      await printers.card.upload(e.printer.id, plate.send, plate.file)
+    }
   }
   printers.sent.set(e.printer.id, {
     file: plate.file,
@@ -816,7 +823,10 @@ const sendPlate = async (
     light: plate.light,
     space: plate.space,
   })
-  await sendChecked(link, fromLibrary(link.nextSeq(), "print", plate.payload.print))
+  await sendChecked(
+    link,
+    fromLibrary(link.nextSeq(), "print", { ...plate.payload.print, url: route.url }),
+  )
 }
 
 /** Every printer's report for the library to plan against, or why there's none. */

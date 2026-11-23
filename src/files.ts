@@ -1,5 +1,6 @@
 // The printer's card: implicit FTPS on port 990, user bblp, the access code as the password, as
-// the CLI's ftp_session. The FTP root is the microSD card; plates go in its root.
+// the CLI's ftp_session. The FTP root is the microSD card (a P1's; an H2 or P2S serves only a USB
+// drive here, so plates go to those over the tunnel, tunnel.ts); plates go in its root.
 import { renameSync } from "node:fs"
 import { Client } from "basic-ftp"
 
