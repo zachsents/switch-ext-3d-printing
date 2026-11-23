@@ -18,6 +18,8 @@ export const CONFIG_DIR = process.env.PRINTERS_CONFIG ?? path.join(homedir(), ".
 const MODELS: Record<string, string> = {
   "01S": "P1P",
   "01P": "P1S",
+  "22E": "P2S",
+  "31B": "H2C",
   "00M": "X1C",
   "039": "A1",
   "030": "A1 mini",
