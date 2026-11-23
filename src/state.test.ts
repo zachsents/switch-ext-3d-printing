@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 
 import { cellsFor, lineOf, swapOf } from "./board.ts"
 import { shortOf } from "./short.ts"
+import { track } from "./track.ts"
 import { mergePush, slotsOf, viewOf } from "./state.ts"
 
 const tray = (id: string, type: string, color: string) => ({
@@ -111,6 +112,22 @@ describe("the widget", () => {
       vt_tray: { id: "254", tray_type: "PLA", tray_color: "000000FF" },
     }
     expect(cellsFor(view(p1p)).map((c) => [c.title, c.label])).toEqual([["Ext", "PLA"]])
+  })
+
+  test("setting a P1P's external spool says its slots changed, so its widget redraws", () => {
+    const before = {
+      gcode_state: "IDLE",
+      vt_tray: { id: "254", tray_type: "PLA", tray_color: "000000FF" },
+    }
+    const after = {
+      ...before,
+      vt_tray: { ...before.vt_tray, tray_type: "PETG", tray_color: "FFFFFFFF" },
+    }
+    const first = track(undefined, view(before), undefined, 0, undefined, 0)
+    const next = track(first.seen, view(after), undefined, 1, undefined, 1)
+    expect(next.drafts.filter((d) => d.type === "printers.slots_changed")).toMatchObject([
+      { payload: { slots: [{ slot: "ext", type: "PETG", color: "FFFFFF" }] } },
+    ])
   })
 
   test("printing says its percent and the time left, in words", () => {
