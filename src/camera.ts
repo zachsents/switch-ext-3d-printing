@@ -1,24 +1,12 @@
 // A printer's camera: TLS on port 6000, an 80-byte login, then length-prefixed JPEGs, about one a
-// second, as the `bambu` CLI's grab_frame reads it.
-//
-// The camera serves one client at a time, and a print's timelapse recorder must never miss a frame,
-// so: while a recorder on this Mac holds the printer (a live pid in its lock), its newest frame is
-// served and the camera is never touched. While a job runs without one here (a recorder may run on
-// another Mac), only a quick grab, at most every GRAB_MS. Otherwise one stream is held while someone
-// looks, and let go LINGER_MS after they stop, or at once when a print starts.
-import { spawnSync } from "node:child_process"
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
-import { homedir } from "node:os"
-import path from "node:path"
+// second, as the `bambu` CLI's grab_frame read it. The camera serves one client at a time, and this
+// extension is its only one: one stream is held while someone looks, let go LINGER_MS after they
+// stop, and held throughout while a timelapse records.
 import tls from "node:tls"
 
 import { readConnection } from "./config.ts"
 import { cameraLogin } from "./payloads.ts"
 
-const RECORDERS =
-  process.env.PRINTERS_RECORDERS ?? path.join(homedir(), ".cache", "bambu", "timelapse")
-/** While a job runs, a quick grab at most this often. */
-const GRAB_MS = 20_000
 /** Keep a live stream this long after the last look. */
 const LINGER_MS = 10_000
 /** How long a look waits for a first frame. */
@@ -28,7 +16,8 @@ const MAX_FRAME = 4_000_000
 export interface Frame {
   readonly jpeg: Buffer
   readonly at: number
-  readonly source: "live" | "grab" | "recorder"
+  /** live: from the stream open now; kept: the last one it gave before it closed. */
+  readonly source: "live" | "kept"
 }
 
 /** Opens a camera stream: frames as they come, `onEnd` once if it closes by itself. `signal` closes it. */
@@ -42,8 +31,14 @@ export type Eye = (
 const isJpeg = (b: Buffer) =>
   b.length > 4 && b[0] === 0xff && b[1] === 0xd8 && b.at(-2) === 0xff && b.at(-1) === 0xd9
 
-/** The real camera, on the LAN. */
+/**
+ * The real camera, on the LAN. A P1's camera answers a new connection first with the last frame it
+ * encoded before, which can be hours old, so that frame is thrown away and frames start with the next
+ * one that differs from it, as the CLI's fresh_frame took them.
+ */
 export const tlsEye: Eye = (id, signal, onFrame, onEnd) => {
+  let stale: Buffer | undefined
+  let fresh = false
   let ended = false
   const end = (problem: string) => {
     if (!ended) {
@@ -83,8 +78,13 @@ export const tlsEye: Eye = (id, signal, onFrame, onEnd) => {
         socket.destroy()
         return
       }
-      if (!signal.aborted) {
-        onFrame(jpeg)
+      if (stale === undefined) {
+        stale = jpeg
+      } else if (fresh || !jpeg.equals(stale)) {
+        fresh = true
+        if (!signal.aborted) {
+          onFrame(jpeg)
+        }
       }
     }
   })
@@ -104,54 +104,6 @@ export const tlsEye: Eye = (id, signal, onFrame, onEnd) => {
   })
 }
 
-const parseJson = (text: string): unknown => {
-  try {
-    return JSON.parse(text)
-  } catch {
-    return undefined
-  }
-}
-
-/** Whether `pid` is a running `bambu timelapse record`. When it can't tell, it counts as one. */
-const isRecorder = (pid: number) => {
-  try {
-    process.kill(pid, 0)
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ESRCH") {
-      return false
-    }
-  }
-  const ps = spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf-8" })
-  return ps.error === undefined ? ps.stdout.includes("timelapse record") : true
-}
-
-/** The newest frame of a recorder holding this printer's camera on this Mac, if one does. */
-const recorderFrame = (id: string): Frame | "held" | undefined => {
-  const lock = path.join(RECORDERS, `${id}.json`)
-  if (!existsSync(lock)) {
-    return undefined
-  }
-  const info = parseJson(readFileSync(lock, "utf-8"))
-  if (typeof info !== "object" || info === null || !("pid" in info) || !("frames" in info)) {
-    return undefined
-  }
-  const { pid, frames } = info
-  if (typeof pid !== "number" || typeof frames !== "string" || !isRecorder(pid)) {
-    return undefined
-  }
-  const names = existsSync(frames)
-    ? readdirSync(frames)
-        .filter((n) => /^\d+\.jpg$/u.test(n))
-        .toSorted()
-    : []
-  const newest = names.at(-1)
-  if (newest === undefined) {
-    return "held"
-  }
-  const file = path.join(frames, newest)
-  return { jpeg: readFileSync(file), at: statSync(file).mtimeMs, source: "recorder" }
-}
-
 /** After a stream fails, wait this long before opening another. */
 const RETRY_MS = 5000
 
@@ -160,57 +112,55 @@ export class Camera {
   problem = ""
   readonly id: string
   private readonly eye: Eye
-  /** A job is on the printer. */
-  private readonly busy: () => boolean
   private stream: AbortController | undefined
   private lastAsked = 0
   private retryAt = 0
-  private linger: ReturnType<typeof setInterval> | undefined
-  private grabbing: Promise<void> | undefined
+  /** Timelapses recording: the stream stays open while any does. */
+  private holds = 0
+  private ticker: ReturnType<typeof setInterval> | undefined
   private readonly waiting = new Set<() => void>()
 
-  constructor(id: string, eye: Eye, busy: () => boolean) {
+  constructor(id: string, eye: Eye) {
     this.id = id
     this.eye = eye
-    this.busy = busy
   }
 
-  /** The newest frame for someone looking now, following the rules above. */
+  /** The newest frame for someone looking now. */
   async frame(): Promise<Frame | undefined> {
     this.lastAsked = Date.now()
-    const held = recorderFrame(this.id)
-    if (held !== undefined) {
-      this.letGo()
-      if (held !== "held") {
-        this.latest = held
-      }
-      return this.latest
-    }
-    if (this.busy()) {
-      this.letGo()
-      if ((!this.latest || Date.now() - this.latest.at > GRAB_MS) && Date.now() >= this.retryAt) {
-        await this.grab()
-      }
-      return this.latest
-    }
-    if (!this.stream && Date.now() >= this.retryAt) {
-      this.openLive()
-    }
+    this.ensure()
     if (this.stream && this.latest?.source !== "live") {
       await this.next(FIRST_MS)
     }
     return this.latest
   }
 
-  /** A report came: a print starting frees the camera at once. */
-  poke() {
-    if (this.stream && this.busy()) {
-      this.letGo()
-    }
+  /** Keeps the stream open until `release`, reopening it when it fails. */
+  hold() {
+    this.holds += 1
+    this.ensure()
+  }
+
+  release() {
+    this.holds = Math.max(0, this.holds - 1)
   }
 
   stop() {
+    this.holds = 0
     this.letGo()
+  }
+
+  private ensure() {
+    if (!this.stream && Date.now() >= this.retryAt) {
+      this.openLive()
+    }
+    this.ticker ??= setInterval(() => {
+      if (this.holds > 0) {
+        this.ensure()
+      } else if (Date.now() - this.lastAsked > LINGER_MS) {
+        this.letGo()
+      }
+    }, 1000)
   }
 
   private async next(ms: number) {
@@ -225,8 +175,8 @@ export class Camera {
     await promise
   }
 
-  private got(jpeg: Buffer, source: Frame["source"]) {
-    this.latest = { jpeg, at: Date.now(), source }
+  private got(jpeg: Buffer) {
+    this.latest = { jpeg, at: Date.now(), source: "live" }
     this.problem = ""
     for (const w of this.waiting) {
       w()
@@ -241,35 +191,6 @@ export class Camera {
     }
   }
 
-  private async grab() {
-    if (this.grabbing === undefined) {
-      const { promise, resolve } = Promise.withResolvers<undefined>()
-      const stop = new AbortController()
-      this.eye(
-        this.id,
-        stop.signal,
-        (jpeg) => {
-          this.got(jpeg, "grab")
-          stop.abort()
-          resolve(undefined)
-        },
-        (problem) => {
-          this.failed(problem)
-          resolve(undefined)
-        },
-      )
-      const timer = setTimeout(() => {
-        stop.abort()
-        resolve(undefined)
-      }, FIRST_MS)
-      this.grabbing = promise.finally(() => {
-        clearTimeout(timer)
-        this.grabbing = undefined
-      })
-    }
-    await this.grabbing
-  }
-
   private openLive() {
     const stop = new AbortController()
     this.stream = stop
@@ -277,34 +198,29 @@ export class Camera {
       this.id,
       stop.signal,
       (jpeg) => {
-        this.got(jpeg, "live")
+        this.got(jpeg)
       },
       (problem) => {
         this.failed(problem)
         if (this.stream === stop) {
-          this.letGo()
+          this.closeStream()
         }
       },
     )
-    if (this.stream !== stop) {
-      return
-    }
-    clearInterval(this.linger)
-    this.linger = setInterval(() => {
-      if (Date.now() - this.lastAsked > LINGER_MS || this.busy()) {
-        this.letGo()
-      }
-    }, 1000)
   }
 
-  private letGo() {
-    clearInterval(this.linger)
-    this.linger = undefined
+  private closeStream() {
     const s = this.stream
     this.stream = undefined
     s?.abort()
     if (this.latest?.source === "live") {
-      this.latest = { ...this.latest, source: "grab" }
+      this.latest = { ...this.latest, source: "kept" }
     }
+  }
+
+  private letGo() {
+    clearInterval(this.ticker)
+    this.ticker = undefined
+    this.closeStream()
   }
 }
