@@ -32,6 +32,8 @@ On the machine that runs it:
   it was down is still reported; every job's history (`jobs.jsonl`, the `jobs` tool); recordings
   in progress (`timelapses.json`, carried on after a restart into the same frames); each printer's
   last spool (`last-spool.json`, for the purge after a spool change); and slicing scratch (`work/`).
+- A print's Live Activity shows in the space of the work that sent it (kept with the job), else
+  the space holding that printer's widget, else Home.
 - Running uses one activity slot per printer. On reconnect, a running printer replaces
   that slot, and a job kept as running that the printer isn't printing now is ended (finished or failed as
   the printer says, else stopped); an idle printer's ended print isn't ended again.

@@ -36,6 +36,8 @@ const job = Schema.Struct({
   /** print's light: the chamber light kept on through it. */
   keepLight: Schema.Boolean,
   lightAt: Schema.Finite,
+  /** The space of the work that sent it (its Live Activity shows there). */
+  space: Schema.optionalKey(Schema.String),
   timelapse,
 })
 export type Job = typeof job.Type

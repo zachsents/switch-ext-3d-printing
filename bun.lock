@@ -10,7 +10,7 @@
         "basic-ftp": "^6.2.6",
         "effect": "^4.1.5",
         "mqtt": "^5.16.1",
-        "switch-ext-kit": "github:zachsents/switch-ext-kit#8a500e4",
+        "switch-ext-kit": "github:zachsents/switch-ext-kit#0d6216e",
       },
       "devDependencies": {
         "@types/bun": "^1.4.5",
@@ -419,7 +419,7 @@
 
     "strip-final-newline": ["strip-final-newline@4.0.0", "", {}, "sha512-aulFJcD6YK8V1G7iRB5tigAP4TsHBZZrOV8pjV++zdUwmeV8uzbY7yn6h9MswN62adStNZFuCIx4haBnRuMDaw=="],
 
-    "switch-ext-kit": ["switch-ext-kit@github:zachsents/switch-ext-kit#8a500e4", { "dependencies": { "@modelcontextprotocol/server": "^2.4.0", "oxc-parser": "^0.159.0" }, "peerDependencies": { "effect": "^4.1.4" }, "bin": { "ui-captions": "./bin/ui-captions.ts" } }, "zachsents-switch-ext-kit-8a500e4", "sha512-PUq5rE6S98dMjw+9ANYSuUkimEhT2byOu/X0eOw79gzTWMxNzVRY8Th6aLA9SzPlDn9ni5SuHc+EYCgQJd7HRg=="],
+    "switch-ext-kit": ["switch-ext-kit@github:zachsents/switch-ext-kit#0d6216e", { "dependencies": { "@modelcontextprotocol/server": "^2.4.0", "oxc-parser": "^0.159.0" }, "peerDependencies": { "effect": "^4.1.4" }, "bin": { "ui-captions": "./bin/ui-captions.ts" } }, "zachsents-switch-ext-kit-0d6216e", "sha512-+u0QbAMygQXW7DsTfbWABf2Ejt3RzoKFMK/fHXXZcaP5Rs7LboVyRCDtXqSutdBMop2nhSW6BYJ8HaKLglNJOA=="],
 
     "tinyexec": ["tinyexec@1.3.1", "", {}, "sha512-GCvB3aoys96IuDFBMcTB46JOR6mdMtAToqwiW8JlWhsoh1mhHi/xn9ss/Dg7N555GiJyEt2qzoG/NHCwM6h1EA=="],
 

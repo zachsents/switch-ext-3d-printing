@@ -1,8 +1,10 @@
 // A print in progress as an iPhone Live Activity. iOS draws it from a compiled template, so it's
 // not a widget: the iPhone's tools in the core (iphone_live_activity_start, _update, _end) start,
 // move and end it, with the progress template. Reached the way an agent reaches them: the core's
-// apps over MCP (`/apps`). A missing iPhone or an unreachable core is skipped quietly.
+// apps over MCP (`/apps`). A missing iPhone or an unreachable core is skipped quietly. It shows in
+// the space of the work that sent the print, else the space holding the printer's widget, else Home.
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client"
+import { Schema } from "effect"
 
 /** One print's activity: everything the template shows. */
 export interface PrintActivity {
@@ -19,7 +21,8 @@ export interface PrintActivity {
 
 /** The iPhone's Live Activity tool, by one stable key per printer. */
 export interface LiveActivities {
-  readonly start: (key: string, content: PrintActivity) => Promise<void>
+  /** `space`: the space of the work that sent the print, if one did. */
+  readonly start: (key: string, content: PrintActivity, space?: string) => Promise<void>
   readonly update: (key: string, content: PrintActivity) => Promise<void>
   readonly end: (key: string, content: PrintActivity) => Promise<void>
 }
@@ -36,6 +39,18 @@ export const noActivities: LiveActivities = {
     await Promise.resolve()
   },
 }
+
+const decodeWidgets = Schema.decodeUnknownOption(
+  Schema.Struct({
+    widgets: Schema.Array(
+      Schema.Struct({
+        app: Schema.String,
+        name: Schema.String,
+        space: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      }),
+    ),
+  }),
+)
 
 const idOf = (key: string) => `print-${key.toLowerCase().replaceAll(/[^a-z0-9]+/gu, "-")}`
 
@@ -62,7 +77,7 @@ const contentOf = (a: PrintActivity) => ({
 /** Through the core at `url` (its root, like http://127.0.0.1:4871). */
 export const coreActivities = (url: string): LiveActivities => {
   let connected: Promise<Client> | null = null
-  const call = async (name: string, args: Record<string, unknown>) => {
+  const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
     try {
       connected ??= (async () => {
         const client = new Client({ name: "printers", version: "1" })
@@ -70,17 +85,29 @@ export const coreActivities = (url: string): LiveActivities => {
         return client
       })()
       const client = await connected
-      await client.callTool({ name, arguments: args })
+      const result = await client.callTool({ name, arguments: args })
+      return result.structuredContent
     } catch {
       connected = null
+      return null
     }
   }
+  /** The space the printer's widget is placed in, when it is. */
+  const widgetSpace = async (printer: string) => {
+    const placed = decodeWidgets(await call("brain_widgets", {}))
+    return placed._tag === "Some"
+      ? (placed.value.widgets.find((w) => w.app === "printers" && w.name === `printer-${printer}`)
+          ?.space ?? undefined)
+      : undefined
+  }
   return {
-    start: async (key, a) => {
+    start: async (key, a, sent) => {
+      const space = sent ?? (await widgetSpace(a.printer))
       await call("iphone_live_activity_start", {
         id: idOf(key),
         template: "progress",
         ...contentOf(a),
+        ...(space === undefined ? {} : { space }),
       })
     },
     update: async (key, a) => {

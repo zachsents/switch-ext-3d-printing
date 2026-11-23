@@ -21,7 +21,7 @@
     "basic-ftp": "^6.2.6",
     "effect": "^4.1.5",
     "mqtt": "^5.16.1",
-    "switch-ext-kit": "github:zachsents/switch-ext-kit#8a500e4"
+    "switch-ext-kit": "github:zachsents/switch-ext-kit#0d6216e"
   },
   "devDependencies": {
     "@types/bun": "^1.4.5",

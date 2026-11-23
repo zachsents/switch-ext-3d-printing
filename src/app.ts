@@ -14,6 +14,7 @@ import {
   answer,
   AppEvents,
   BASIC_CATALOG,
+  Caller,
   defineApp,
   surface,
   SWITCH_CATALOG,
@@ -167,6 +168,8 @@ interface Sent {
   readonly file: string
   readonly at: number
   readonly light: boolean
+  /** The caller's space, if the core said. */
+  readonly space: string | null
 }
 const SENT_MS = 3_600_000
 /** The chamber light is sent again at most this often while a job keeps it on. */
@@ -321,7 +324,11 @@ export class Printers extends Context.Service<
               s !== undefined &&
               plateStem(s.file) === j.file &&
               now - s.at < SENT_MS
-            setJob(ours ? { ...j, keepLight: s.light } : j)
+            setJob(
+              ours
+                ? { ...j, keepLight: s.light, ...(s.space === null ? {} : { space: s.space }) }
+                : j,
+            )
           }
           for (const d of out.drafts) {
             if (
@@ -333,7 +340,12 @@ export class Printers extends Context.Service<
           }
           if (out.activity) {
             const { kind, key } = out.activity
-            activities[kind](key, activityOf(v)).catch(ignore)
+            const space = jobs.get(v.id)?.space
+            const run =
+              kind === "start"
+                ? activities.start(key, activityOf(v), space)
+                : activities[kind](key, activityOf(v))
+            run.catch(ignore)
           }
         }
 
@@ -789,6 +801,7 @@ const sendPlate = async (
     readonly send: string
     readonly payload: Planned["payload"]
     readonly light: boolean
+    readonly space: string | null
   },
 ) => {
   const { link } = e
@@ -797,7 +810,12 @@ const sendPlate = async (
   if (!there.some((f) => f.name === plate.file && f.size === size)) {
     await printers.card.upload(e.printer.id, plate.send, plate.file)
   }
-  printers.sent.set(e.printer.id, { file: plate.file, at: Date.now(), light: plate.light })
+  printers.sent.set(e.printer.id, {
+    file: plate.file,
+    at: Date.now(),
+    light: plate.light,
+    space: plate.space,
+  })
   await sendChecked(link, fromLibrary(link.nextSeq(), "print", plate.payload.print))
 }
 
@@ -873,6 +891,7 @@ const print = tool(
   (input) =>
     Effect.gen(function* printing() {
       const printers = yield* Printers
+      const caller = yield* Caller
       const file = path.resolve(input.file.replace(/^~\//u, `${homedir()}/`))
       const name = path.basename(file)
       const dryRun = input.dryRun ?? false
@@ -942,7 +961,13 @@ const print = tool(
         )
       }
       yield* attempt(async () => {
-        await sendPlate(printers, e, { file: name, send, payload, light: input.light ?? false })
+        await sendPlate(printers, e, {
+          file: name,
+          send,
+          payload,
+          light: input.light ?? false,
+          space: caller.space,
+        })
         keepSpool(e.printer.id, signature)
       })
       if (input.timelapse !== false) {
