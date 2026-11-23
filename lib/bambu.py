@@ -1694,9 +1694,10 @@ def plan_cmd(args):
     """A print, planned as the extension's `print` sends it, from a JSON request on stdin: {file, printer (an id or
     "auto"), printers (id -> {state: its merged report, or why there's none; model: P1P/P1S}), slots (A1..A4 or ext,
     per filament), force, loaded, quick_start, dry_run, level, vibration, check (run the pre-print check first), last
-    (the picked printer's last print's spool signature, by id)}. Answers one JSON line: {printer, said (lines: the check
-    and the auto pick), errors, setting (loaded's ams_filament_setting fields, null when nothing to set), plan, notes,
-    purge, signature, send (the file to upload: the plate, or its full-purge copy), payload (project_file)}, or {error}.
+    (the picked printer's last print's spool signature, by id)}. Answers one JSON line: {printer, check (its lines),
+    errors, setting (loaded's ams_filament_setting fields, null when nothing to set), plan, notes (the auto pick's
+    line first), purge, signature, send (the file to upload: the plate, or its full-purge copy), payload
+    (project_file)}, or {error}.
     A dry run, or a request with a setting still to send, makes no purge copy."""
     req = json.loads(sys.stdin.read())
     path = Path(req["file"]).expanduser().resolve()
@@ -1704,21 +1705,22 @@ def plan_cmd(args):
     req["ams"] = ams_arg(slots[0]) if len(slots) == 1 else None
     req["ams_map"] = [ams_arg(x) for x in slots] if len(slots) > 1 else None
     req["force"] = bool(req.get("force"))
-    out, said = {}, io.StringIO()
+    checked, notes = io.StringIO(), []
+    errors = 0
     if req.get("check"):
-        with contextlib.redirect_stdout(said):
-            found = report_check(path)
-        out["errors"] = len(found["errors"])
-        if found["errors"] and not req["force"]:
-            raise PrinterError("not sending: check found errors:\n" + said.getvalue().rstrip())
-        if found["errors"]:
-            print("force: sending despite the check errors above", file=said)
+        with contextlib.redirect_stdout(checked):
+            errors = len(report_check(path)["errors"])
+        if errors and not req["force"]:
+            raise PrinterError("not sending: check found errors (fix the slice, or pass force if you've looked and it's fine):\n"
+                               + checked.getvalue().rstrip())
+        if errors:
+            notes.append("force: sending despite the check errors")
     name, printers = req["printer"], req["printers"]
     if name == "auto" and req.get("loaded"):
         raise PrinterError("loaded needs the printer the spool went on, not auto")
     if name == "auto":
         name, why = pick_printer(path, printers, req)
-        print(why, file=said)
+        notes.insert(0, why)
     if name not in printers:
         raise PrinterError(f"no printer {name}")
     state, here = printers[name]["state"], printers[name].get("model")
@@ -1726,7 +1728,7 @@ def plan_cmd(args):
         raise PrinterError(f"{name}: {state}")
     if state.get("gcode_state") in ("RUNNING", "PREPARE", "PAUSE"):
         raise PrinterError(f"{name} is busy ({state.get('gcode_state')}); not sending")
-    filaments, model, notes = sliced_filaments(path), sliced_model(path), []
+    filaments, model = sliced_filaments(path), sliced_model(path)
     setting = None
     if req.get("loaded"):
         # The setting says what's on the printer, so it changes when the spool goes on, never ahead: loaded is the word
@@ -1755,7 +1757,7 @@ def plan_cmd(args):
     if purge and not req.get("dry_run") and not setting and (purged := with_full_purge(path)):
         send = purged
     payload = project_file_payload(path.name, hashlib.md5(send.read_bytes()).hexdigest(), plan, False, req.get("level", True), bool(req.get("vibration")))
-    print(json.dumps({**out, "printer": name, "said": said.getvalue().splitlines(), "setting": setting, "plan": describe_plan(plan),
+    print(json.dumps({"printer": name, "check": checked.getvalue().splitlines(), "errors": errors, "setting": setting, "plan": describe_plan(plan),
                       "notes": notes, "purge": purge, "signature": plan["signature"], "send": str(send), "payload": payload}))
 
 
