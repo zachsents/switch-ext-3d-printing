@@ -68,6 +68,8 @@ export const filamentSetting = (
       command: "ams_filament_setting",
       ams_id: where.ams,
       tray_id: where.tray,
+      // Bambu Studio's slot within the unit; the external spool's is 0.
+      slot_id: where.tray === 254 ? 0 : where.tray,
       tray_info_idx: preset.idx,
       tray_type: preset.type,
       tray_color: hex.length === 8 ? hex : `${hex}FF`,

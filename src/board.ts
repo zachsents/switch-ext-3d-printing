@@ -1,32 +1,71 @@
-// A printer's line as Switch's house components draw it: a Row (its mark, name, what's under
-// it, progress and time left) over a Pick per AMS slot or the external spool, each swapping its
-// filament with set_filament.
+// A printer's widget as Switch's house components draw it: its live camera with its line laid on it
+// (its mark, name, where it's at, time left), and under the picture a Pick per AMS slot and the
+// external spool, each setting what that slot holds with set_filament.
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import path from "node:path"
+
+import { Option, Schema } from "effect"
+
 import type { View } from "./state.ts"
 
-/** What a swap offers, as the Pick's groups. */
-export const SWAP = [
-  { key: "type", choices: ["PLA", "PETG", "ASA", "ABS", "TPU"] },
+/** Types every swap offers, then those on hand. */
+const TYPES = ["PLA", "PETG", "ASA", "ABS", "TPU"]
+
+/** Colors every swap offers, after those on hand. */
+const PALETTE = [
+  "000000",
+  "FFFFFF",
+  "8E8E8E",
+  "C0C0C0",
+  "C81E23",
+  "F0781E",
+  "F0D228",
+  "289646",
+  "009696",
+  "1E5AC8",
+  "14235A",
+  "783CAA",
+  "F08CB4",
+  "6E4628",
+  "E1CDA5",
+  "C8A03C",
+]
+
+/** A filament on hand, as the user's shelf says it: what a swap offers first. */
+export interface Stocked {
+  readonly type: string
+  /** RRGGBB. */
+  readonly color: string
+}
+
+/** What's on hand, kept in the extension's folder (stock.json) by the stock tool. */
+const STOCK = path.resolve("stock.json")
+
+const decodeStock = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Array(Schema.Struct({ type: Schema.String, color: Schema.String }))),
+)
+
+export const readStock = (file = STOCK): readonly Stocked[] =>
+  existsSync(file) ? decodeStock(readFileSync(file, "utf-8")).pipe(Option.getOrElse(() => [])) : []
+
+export const writeStock = (stock: readonly Stocked[], file = STOCK) => {
+  writeFileSync(`${file}.tmp`, JSON.stringify(stock))
+  renameSync(`${file}.tmp`, file)
+}
+
+const unique = (xs: readonly string[]) => [...new Set(xs)]
+
+/**
+ * What a swap offers, as the Pick's groups: the types and colors on hand first, then the usual
+ * ones, and any other color as RRGGBB (`custom`).
+ */
+export const swapOf = (stock: readonly Stocked[]) => [
+  { key: "type", choices: unique([...stock.map((x) => x.type.toUpperCase()), ...TYPES]) },
   {
     key: "color",
     swatches: true,
-    choices: [
-      "000000",
-      "FFFFFF",
-      "8E8E8E",
-      "C0C0C0",
-      "C81E23",
-      "F0781E",
-      "F0D228",
-      "289646",
-      "009696",
-      "1E5AC8",
-      "14235A",
-      "783CAA",
-      "F08CB4",
-      "6E4628",
-      "E1CDA5",
-      "C8A03C",
-    ],
+    custom: true,
+    choices: unique([...stock.map((x) => x.color.toUpperCase()), ...PALETTE]),
   },
   { key: "brand", choices: ["Generic", "Bambu"] },
 ]
@@ -70,48 +109,39 @@ const markOf = (v: View) => {
 
 const brand = (b: string | undefined) => (b === "Bambu" ? "Bambu" : "Generic")
 
-const cellsOf = (v: View): Cell[] => {
-  const slots = v.slots.map((s): Cell => ({
-    label: s.type ?? s.slot,
-    swatch: s.loaded ? (s.color ?? "") : "",
+/** Each AMS slot, then the external spool: the slot's name and what it holds ("A1 PLA"). */
+export const cellsFor = (v: View): Cell[] => [
+  ...v.slots.map((s): Cell => ({
+    label: s.type === undefined ? s.slot : `${s.slot} ${s.type}`,
+    swatch: s.color ?? "",
     strong: s.active,
     title: s.slot,
     current: { type: s.type ?? "PLA", color: s.color ?? "FFFFFF", brand: brand(s.brand) },
     args: { printer: v.id, slot: s.slot },
-  }))
-  if (slots.length > 0) {
-    return slots
-  }
-  return [
-    {
-      label: v.spool?.type ?? "ext",
-      swatch: v.spool?.color ?? "",
-      strong: false,
-      title: "Spool",
-      current: {
-        type: v.spool?.type ?? "PLA",
-        color: v.spool?.color ?? "FFFFFF",
-        brand: "Generic",
-      },
-      args: { printer: v.id, slot: "ext" },
+  })),
+  {
+    label: v.spool ? `Ext ${v.spool.type}` : "Ext",
+    swatch: v.spool?.color ?? "",
+    strong: false,
+    title: "Ext",
+    current: {
+      type: v.spool?.type ?? "PLA",
+      color: v.spool?.color ?? "FFFFFF",
+      brand: "Generic",
     },
-  ]
-}
-
-const two = (n: number) => String(n).padStart(2, "0")
-
-/** Minutes as a clock: "1:12". */
-const clock = (minutes: number) => `${Math.floor(minutes / 60)}:${two(minutes % 60)}`
+    args: { printer: v.id, slot: "ext" },
+  },
+]
 
 /** A time of day: "12:23 AM". */
 const timeOf = (ms: number) =>
   new Date(ms).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
 
-/** Where it's at, as its plate says it: "Printing 43% · 1:12 left", "Done 12:23 AM", "Idle". */
+/** Where it's at, as its plate says it: "Printing 43%", "Done 12:23 AM", "Idle" (time left is the countdown). */
 const stateOf = (v: View, doneAt: number | null) => {
   switch (v.phase) {
     case "printing": {
-      return `Printing ${v.percent}% · ${clock(v.minutesLeft)} left`
+      return `Printing ${v.percent}%`
     }
     case "preparing": {
       return v.stage ?? "Preparing"
@@ -154,6 +184,6 @@ export const lineOf = (v: View, doneAt: number | null = null): Line => {
     values: [],
     progress: active ? v.percent : null,
     endsAt: active ? v.endsAt : null,
-    cells: cellsOf(v),
+    cells: cellsFor(v),
   }
 }

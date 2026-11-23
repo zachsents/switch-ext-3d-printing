@@ -62,7 +62,7 @@ import { makingTools } from "./making.ts"
 import { INTERVAL_S, MIN_INTERVAL_S, plateStem, Recorders, timelapseRoot } from "./timelapse.ts"
 import { track } from "./track.ts"
 import type { Seen } from "./track.ts"
-import { lineOf, SWAP } from "./board.ts"
+import { lineOf, readStock, swapOf, writeStock } from "./board.ts"
 
 const APP = "printers"
 
@@ -649,6 +649,40 @@ const setFilament = tool(
     }),
 )
 
+const stock = tool(
+  "stock",
+  {
+    description:
+      "The filaments on hand, which a slot's swap on the printers' widgets offers first: each a type (PLA, PETG...) and a color (RRGGBB). Replaces the list; without filaments, answers it.",
+    input: Schema.Struct({
+      filaments: Schema.optionalKey(
+        Schema.Array(Schema.Struct({ type: Schema.String, color: Schema.String })),
+      ),
+    }),
+  },
+  (input) =>
+    Effect.gen(function* stocking() {
+      if (input.filaments === undefined) {
+        return { filaments: readStock() }
+      }
+      const filaments = input.filaments.map((f) => ({
+        type: f.type.trim().toUpperCase(),
+        color: f.color.replace(/^#/u, "").toUpperCase(),
+      }))
+      const bad = filaments.find((f) => !/^[0-9A-F]{6}$/u.test(f.color) || f.type === "")
+      if (bad) {
+        return yield* Effect.fail(new Error(`${bad.type} ${bad.color}: a type and an RRGGBB color`))
+      }
+      yield* Effect.try({
+        try: () => {
+          writeStock(filaments)
+        },
+        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+      })
+      return { filaments }
+    }),
+)
+
 const files = tool(
   "files",
   {
@@ -665,14 +699,28 @@ const files = tool(
     }),
 )
 
+/** A frame older than this isn't live: a widget asking for a `fresh` one gets none. */
+const FRESH_MS = 5000
+
 const camera = tool(
   "camera",
-  { description: "A printer's camera, now.", readOnly: true, input: which },
+  {
+    description:
+      "A printer's camera, now. fresh: only a frame from the last few seconds, else no picture (data empty).",
+    readOnly: true,
+    input: Schema.Struct({ printer: Schema.String, fresh: Schema.optionalKey(Schema.Boolean) }),
+  },
   (input) =>
     Effect.gen(function* looking() {
       const printers = yield* Printers
       const e = yield* find(printers, input.printer)
       const frame = yield* attempt(async () => await e.camera.frame())
+      if (
+        input.fresh === true &&
+        (!frame || frame.source !== "live" || Date.now() - frame.at > FRESH_MS)
+      ) {
+        return { printer: e.printer.id, mimeType: "image/jpeg", data: "" }
+      }
       if (!frame) {
         return yield* Effect.fail(new Error(e.camera.problem || "No picture"))
       }
@@ -1440,8 +1488,9 @@ const wait = tool(
 // ── Widgets ──
 
 /**
- * One printer as its widget draws it: its line (mark, name, job, progress, time left) over a Pick
- * per AMS slot or the external spool, then its camera. Only the user's clients call it.
+ * One printer as its widget draws it: its live camera, its line laid on the picture (mark, name,
+ * where it's at, time left), and a Pick per AMS slot and the external spool under it. Only the
+ * user's clients call it.
  */
 const cardTool = (p: Printer) =>
   tool(
@@ -1452,13 +1501,13 @@ const cardTool = (p: Printer) =>
         const printers = yield* Printers
         const e = yield* find(printers, p.id)
         const v = printers.view(e)
-        return { line: lineOf(v, printers.doneAt(v)), camera: { printer: p.id } }
+        return { line: lineOf(v, printers.doneAt(v)), camera: { printer: p.id, fresh: true } }
       }),
   )
 
 const cards = PRINTERS.map(cardTool)
 
-// A printer is one cell: its live camera and its line (its name, where it's at). Every printer's
+// A printer is one cell: its live camera, its name on it, what it holds under it. Every printer's
 // widget keeps the camera's frame, so they sit alike.
 const printerWidget = (p: Printer): WidgetDef => ({
   name: `printer-${p.id}`,
@@ -1486,7 +1535,15 @@ const printerWidget = (p: Printer): WidgetDef => ({
   ],
   a2ui: () =>
     surface("printer", SWITCH_CATALOG, [
-      { id: "root", component: "Column", catalogId: BASIC_CATALOG, children: ["lines", "camera"] },
+      { id: "root", component: "Column", catalogId: BASIC_CATALOG, children: ["camera", "lines"] },
+      {
+        id: "camera",
+        component: "Feed",
+        action: "camera",
+        args: { "@path": "/camera" },
+        every: 1000,
+        ratio: 16 / 9,
+      },
       { id: "lines", component: "List", catalogId: BASIC_CATALOG, children: ["line"] },
       {
         id: "line",
@@ -1509,16 +1566,8 @@ const printerWidget = (p: Printer): WidgetDef => ({
         title: { "@path": "title" },
         current: { "@path": "current" },
         args: { "@path": "args" },
-        groups: SWAP,
+        groups: swapOf(readStock()),
         action: "set_filament",
-      },
-      {
-        id: "camera",
-        component: "Feed",
-        action: "camera",
-        args: { "@path": "/camera" },
-        every: 1000,
-        ratio: 16 / 9,
       },
     ]),
 })
@@ -1539,6 +1588,7 @@ export const printersApp = defineApp<Printers>({
     camera,
     files,
     setFilament,
+    stock,
     pause,
     resume,
     stop,
