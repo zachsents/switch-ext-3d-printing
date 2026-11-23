@@ -51,13 +51,16 @@ export interface Tracked {
   readonly jobs: readonly Job[]
 }
 
-export const shownSlots = (v: View) =>
-  v.slots.map((s) => ({
+/** Each AMS slot, then the external spool ("ext") when it's set: what each holds. */
+export const shownSlots = (v: View) => [
+  ...v.slots.map((s) => ({
     slot: s.slot,
     ...(s.type === undefined ? {} : { type: s.type }),
     ...(s.color === undefined ? {} : { color: s.color }),
     ...(s.brand === undefined ? {} : { brand: s.brand }),
-  }))
+  })),
+  ...(v.spool ? [{ slot: "ext", ...v.spool }] : []),
+]
 
 const progressOf = (v: View) => ({
   percent: v.percent,
@@ -232,8 +235,9 @@ const alertsOf = (before: Seen, v: View, stage: number | undefined, slots: strin
       )
     }
   }
-  if (slots !== before.slots && v.slots.length > 0) {
-    drafts.push(SlotsChanged.make({ ...w, slots: shownSlots(v) }))
+  const shown = shownSlots(v)
+  if (slots !== before.slots && shown.length > 0) {
+    drafts.push(SlotsChanged.make({ ...w, slots: shown }))
   }
   return drafts
 }
