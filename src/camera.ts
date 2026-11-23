@@ -1,11 +1,15 @@
-// A printer's camera: TLS on port 6000, an 80-byte login, then length-prefixed JPEGs, about one a
-// second, as the `bambu` CLI's grab_frame read it. The camera serves one client at a time, and this
+// A printer's camera. P1, P2 and A1: TLS on port 6000, an 80-byte login, then length-prefixed
+// JPEGs, about one a second, as the `bambu` CLI's grab_frame read it. X1 and H2: RTSPS on port 322,
+// pulled a frame at a time (rtsps.ts, rtspsEye). The camera serves one client at a time, and this
 // extension is its only one: one stream is held while someone looks, let go LINGER_MS after they
 // stop, and held throughout while a timelapse records.
 import tls from "node:tls"
 
 import { readConnection } from "./config.ts"
+import type { Connection } from "./config.ts"
 import { cameraLogin } from "./payloads.ts"
+import { PULL_EVERY_MS, pullFrame, RTSPS_MODELS } from "./rtsps.ts"
+import type { Spawner } from "./rtsps.ts"
 
 /** Keep a live stream this long after the last look. */
 const LINGER_MS = 10_000
@@ -103,6 +107,69 @@ export const tlsEye: Eye = (id, signal, onFrame, onEnd) => {
     socket.destroy()
   })
 }
+
+/**
+ * The camera of an X1 or H2 (rtsps.ts): one-frame ffmpeg pulls, back to back, at most one a
+ * PULL_EVERY_MS, while the stream is open. A pull that fails ends the stream, as a dropped socket
+ * does; Camera retries it. Every frame comes from a pull started after the stream opened, so none is
+ * older than this look.
+ */
+export const makeRtspsEye =
+  (
+    options: {
+      readonly spawner?: Spawner
+      readonly everyMs?: number
+      readonly timeoutMs?: number
+      readonly read?: (id: string) => Connection
+    } = {},
+  ): Eye =>
+  (id, signal, onFrame, onEnd) => {
+    let conn: Connection
+    try {
+      conn = (options.read ?? readConnection)(id)
+    } catch (error) {
+      onEnd(error instanceof Error ? error.message : String(error))
+      return
+    }
+    const every = options.everyMs ?? PULL_EVERY_MS
+    const fail = (error: unknown) => {
+      if (!signal.aborted) {
+        onEnd(error instanceof Error ? error.message : String(error))
+      }
+    }
+    // Each pull schedules the next, so a stream held for hours builds no chain.
+    const pull = async () => {
+      const started = Date.now()
+      let jpeg: Buffer
+      try {
+        jpeg = await pullFrame(conn, signal, {
+          ...(options.spawner ? { spawner: options.spawner } : {}),
+          ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+        })
+      } catch (error) {
+        fail(error)
+        return
+      }
+      if (signal.aborted) {
+        return
+      }
+      onFrame(jpeg)
+      setTimeout(
+        () => {
+          if (!signal.aborted) {
+            void pull()
+          }
+        },
+        Math.max(0, every - (Date.now() - started)),
+      )
+    }
+    void pull()
+  }
+
+export const rtspsEye: Eye = makeRtspsEye()
+
+/** The camera a model has: RTSPS for X1 and H2, the JPEG stream on 6000 for the rest. */
+export const eyeFor = (model: string): Eye => (RTSPS_MODELS.has(model) ? rtspsEye : tlsEye)
 
 /** After a stream fails, wait this long before opening another. */
 const RETRY_MS = 5000

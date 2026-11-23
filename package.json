@@ -13,7 +13,8 @@
     "format": "oxfmt --write .",
     "fix": "bun run lint && bun run format",
     "check": "bun run typecheck && bun run captions && bun run fix",
-    "captions": "ui-captions src ios"
+    "captions": "ui-captions src ios",
+    "test": "bun test"
   },
   "dependencies": {
     "@modelcontextprotocol/client": "^2.4.0",
