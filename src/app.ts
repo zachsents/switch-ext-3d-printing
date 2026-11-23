@@ -1581,6 +1581,7 @@ export const printersApp = defineApp<Printers>({
     "Printing: inspect STLs made elsewhere and pick the bed face; slice; read the summary (time, filament_g, objects, bed_C) and every check WARNING, and say the time; confirm the printer's bed is clear (FINISH means the last part is likely still on it); print (dryRun first to see the plan); wait until printing. Every print records a timelapse (timelapse list; timelapse_saved says where); jobs is the history.",
     "Swapping the external spool: heat to the old filament's temperature, unload, have the new one fed in, extrude until it runs clean, then set_filament.",
     "After a spool swap, set_filament on that slot or the external spool right away: print matches the plate against what the printer reports.",
+    "stock: the filaments on hand (type and RRGGBB), which the widgets' slot swap offers first; set it whenever what's on hand changes.",
   ].join("\n"),
   tools: [
     status,
