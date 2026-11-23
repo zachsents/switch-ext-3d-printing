@@ -141,7 +141,9 @@ describe("trouble in a word or two", () => {
     expect(shortOf("AMS-HT F Slot 3 filament has run out. Please insert a new filament.")).toBe(
       "Filament out",
     )
-    expect(shortOf("The heatbed temperature is abnormal; the heater may be broken.")).toBe("Bed temp")
+    expect(shortOf("The heatbed temperature is abnormal; the heater may be broken.")).toBe(
+      "Bed temp",
+    )
   })
 
   test("any other by its own first words", () => {
