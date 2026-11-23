@@ -10,7 +10,7 @@ import { shortOf } from "./short.ts"
 import type { View } from "./state.ts"
 
 /** Types every swap offers, then those on hand. */
-const TYPES = ["PLA", "PETG", "ASA", "ABS", "TPU"]
+const TYPES = ["PLA", "PETG", "ASA", "ABS", "TPU", "PA", "PC", "PLA-CF", "PETG-CF", "PVA"]
 
 /** Colors every swap offers, after those on hand. */
 const PALETTE = [

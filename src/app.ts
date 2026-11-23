@@ -589,7 +589,7 @@ const setFilament = tool(
   "set_filament",
   {
     description:
-      'Set what an AMS slot (A1-A4) or the external spool ("ext") holds: type (PLA, PETG, ASA, ABS, TPU), color (RRGGBB) and brand (Generic when left out; Bambu, Polymaker...). Only tells the printer; it moves no filament.',
+      'Set what an AMS slot (A1-A4) or the external spool ("ext") holds: type (PLA, PETG, ASA, ABS, TPU, PA, PC, PLA-CF, PETG-CF, PVA...), color (RRGGBB) and brand (Generic when left out; Bambu, Polymaker...). Only tells the printer; it moves no filament.',
     input: Schema.Struct({
       printer: Schema.String,
       slot: Schema.String,
