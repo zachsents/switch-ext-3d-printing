@@ -1,34 +1,73 @@
-// A printer's line as Switch's house components draw it: a Row (its mark, name, what's under
-// it, progress and time left) over a Pick per AMS slot or the external spool, each swapping its
-// filament with set_filament.
+// A printer's widget as Switch's house components draw it: its live camera with its line laid on it
+// (its mark, name, where it's at, time left), and under the picture a Pick per AMS slot and the
+// external spool, each setting what that slot holds with set_filament.
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import path from "node:path"
+
+import { Option, Schema } from "effect"
+
+import { shortOf } from "./short.ts"
 import type { View } from "./state.ts"
 
-/** What a swap offers, as the Pick's groups. */
-export const SWAP = [
-  { key: "type", choices: ["PLA", "PETG", "ASA", "ABS", "TPU"] },
+/** Types every swap offers, then those on hand. */
+const TYPES = ["PLA", "PETG", "ASA", "ABS", "TPU", "PA", "PC", "PLA-CF", "PETG-CF", "PVA"]
+
+/** Colors every swap offers, after those on hand. */
+const PALETTE = [
+  "000000",
+  "FFFFFF",
+  "8E8E8E",
+  "C0C0C0",
+  "C81E23",
+  "F0781E",
+  "F0D228",
+  "289646",
+  "009696",
+  "1E5AC8",
+  "14235A",
+  "783CAA",
+  "F08CB4",
+  "6E4628",
+  "E1CDA5",
+  "C8A03C",
+]
+
+/** A filament on hand, as the user's shelf says it: what a swap offers first. */
+export interface Stocked {
+  readonly type: string
+  /** RRGGBB. */
+  readonly color: string
+}
+
+/** What's on hand, kept in the extension's folder (stock.json) by the stock tool. */
+const STOCK = path.resolve("stock.json")
+
+const decodeStock = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Array(Schema.Struct({ type: Schema.String, color: Schema.String }))),
+)
+
+export const readStock = (file = STOCK): readonly Stocked[] =>
+  existsSync(file) ? decodeStock(readFileSync(file, "utf-8")).pipe(Option.getOrElse(() => [])) : []
+
+export const writeStock = (stock: readonly Stocked[], file = STOCK) => {
+  writeFileSync(`${file}.tmp`, JSON.stringify(stock))
+  renameSync(`${file}.tmp`, file)
+}
+
+const unique = (xs: readonly string[]) => [...new Set(xs)]
+
+/**
+ * What a swap offers, as the Pick's groups: the types and colors on hand first, then the usual
+ * ones, and any other color as RRGGBB (`custom`).
+ */
+export const swapOf = (stock: readonly Stocked[]) => [
+  { key: "type", choices: unique([...stock.map((x) => x.type.toUpperCase()), ...TYPES]) },
   {
     key: "color",
     swatches: true,
-    choices: [
-      "000000",
-      "FFFFFF",
-      "8E8E8E",
-      "C0C0C0",
-      "C81E23",
-      "F0781E",
-      "F0D228",
-      "289646",
-      "009696",
-      "1E5AC8",
-      "14235A",
-      "783CAA",
-      "F08CB4",
-      "6E4628",
-      "E1CDA5",
-      "C8A03C",
-    ],
+    custom: true,
+    choices: unique([...stock.map((x) => x.color.toUpperCase()), ...PALETTE]),
   },
-  { key: "brand", choices: ["Generic", "Bambu"] },
 ]
 
 export interface Cell {
@@ -36,7 +75,7 @@ export interface Cell {
   readonly swatch: string
   readonly strong: boolean
   readonly title: string
-  readonly current: { readonly type: string; readonly color: string; readonly brand: string }
+  readonly current: { readonly type: string; readonly color: string }
   readonly args: { readonly printer: string; readonly slot: string }
 }
 
@@ -45,6 +84,8 @@ export interface Line {
   readonly label: string
   readonly mark: string
   readonly detail: string
+  /** What's wrong in full, when the detail says it in a word or two. */
+  readonly note: string
   readonly alert: boolean
   readonly values: readonly string[]
   readonly progress: number | null
@@ -55,9 +96,6 @@ export interface Line {
 const ACTIVE = new Set(["printing", "preparing", "paused"])
 
 const markOf = (v: View) => {
-  if (v.phase === "printing" || v.phase === "preparing") {
-    return "running"
-  }
   // Paused waits on the user; finished is idle, as Bambu reports it until the next job.
   if (v.phase === "paused") {
     return "needsYou"
@@ -68,50 +106,44 @@ const markOf = (v: View) => {
   return v.errors.length > 0 ? "warn" : ""
 }
 
-const brand = (b: string | undefined) => (b === "Bambu" ? "Bambu" : "Generic")
-
-const cellsOf = (v: View): Cell[] => {
-  const slots = v.slots.map((s): Cell => ({
-    label: s.type ?? s.slot,
-    swatch: s.loaded ? (s.color ?? "") : "",
+/** Each AMS slot, then the external spool: its name ("A1", "Ext") and what it holds ("PLA"). */
+export const cellsFor = (v: View): Cell[] => [
+  ...v.slots.map((s): Cell => ({
+    label: s.type ?? "",
+    swatch: s.color ?? "",
     strong: s.active,
     title: s.slot,
-    current: { type: s.type ?? "PLA", color: s.color ?? "FFFFFF", brand: brand(s.brand) },
+    current: { type: s.type ?? "PLA", color: s.color ?? "FFFFFF" },
     args: { printer: v.id, slot: s.slot },
-  }))
-  if (slots.length > 0) {
-    return slots
-  }
-  return [
-    {
-      label: v.spool?.type ?? "ext",
-      swatch: v.spool?.color ?? "",
-      strong: false,
-      title: "Spool",
-      current: {
-        type: v.spool?.type ?? "PLA",
-        color: v.spool?.color ?? "FFFFFF",
-        brand: "Generic",
-      },
-      args: { printer: v.id, slot: "ext" },
-    },
-  ]
+  })),
+  {
+    label: v.spool?.type ?? "",
+    swatch: v.spool?.color ?? "",
+    strong: false,
+    title: "Ext",
+    current: { type: v.spool?.type ?? "PLA", color: v.spool?.color ?? "FFFFFF" },
+    args: { printer: v.id, slot: "ext" },
+  },
+]
+
+/** Minutes as words: "1h 45m", "12m". */
+const span = (minutes: number) => {
+  const h = Math.floor(minutes / 60)
+  const m = minutes % 60
+  return h > 0 ? `${h}h ${m}m` : `${m}m`
 }
-
-const two = (n: number) => String(n).padStart(2, "0")
-
-/** Minutes as a clock: "1:12". */
-const clock = (minutes: number) => `${Math.floor(minutes / 60)}:${two(minutes % 60)}`
 
 /** A time of day: "12:23 AM". */
 const timeOf = (ms: number) =>
   new Date(ms).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
 
-/** Where it's at, as its plate says it: "Printing 43% · 1:12 left", "Done 12:23 AM", "Idle". */
+/** Where it's at, as its plate says it: "Printing 43% · 1h 12m left", "Done 12:23 AM", "Idle". */
 const stateOf = (v: View, doneAt: number | null) => {
   switch (v.phase) {
     case "printing": {
-      return `Printing ${v.percent}% · ${clock(v.minutesLeft)} left`
+      return v.minutesLeft > 0
+        ? `Printing ${v.percent}% · ${span(v.minutesLeft)} left`
+        : `Printing ${v.percent}%`
     }
     case "preparing": {
       return v.stage ?? "Preparing"
@@ -140,20 +172,28 @@ const stateOf = (v: View, doneAt: number | null) => {
   }
 }
 
-/** Its line: its name, and what's wrong, else where it's at (`doneAt`: when its last job ended). */
+/**
+ * Its line: its name, and what's wrong in a word or two (in full as its note), else where it's at
+ * (`doneAt`: when its last job ended).
+ */
 export const lineOf = (v: View, doneAt: number | null = null): Line => {
   const active = ACTIVE.has(v.phase)
   const wrong = v.errors.map((a) => a.text ?? a.code).find((t) => t !== "")
-  const detail = wrong ?? stateOf(v, doneAt)
+  // What's wrong comes first; while a job runs, how far it's got stays beside it.
+  let detail = stateOf(v, doneAt)
+  if (wrong !== undefined) {
+    detail = active ? `${shortOf(wrong)} · ${v.percent}%` : shortOf(wrong)
+  }
   return {
     id: v.id,
     label: v.name,
     mark: markOf(v),
     detail,
+    note: wrong ?? "",
     alert: wrong !== undefined,
     values: [],
     progress: active ? v.percent : null,
     endsAt: active ? v.endsAt : null,
-    cells: cellsOf(v),
+    cells: cellsFor(v),
   }
 }

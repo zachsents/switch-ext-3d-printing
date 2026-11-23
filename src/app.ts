@@ -63,7 +63,7 @@ import { INTERVAL_S, MIN_INTERVAL_S, plateStem, Recorders, timelapseRoot } from 
 import { track } from "./track.ts"
 import { plateRoute, tunnelUpload } from "./tunnel.ts"
 import type { Seen } from "./track.ts"
-import { lineOf, SWAP } from "./board.ts"
+import { lineOf, readStock, swapOf, writeStock } from "./board.ts"
 
 const APP = "printers"
 
@@ -590,7 +590,7 @@ const setFilament = tool(
   "set_filament",
   {
     description:
-      'Set what an AMS slot (A1-A4) or the external spool ("ext") holds: type (PLA, PETG, ASA, ABS, TPU), color (RRGGBB) and brand (Generic when left out; Bambu, Polymaker...). Only tells the printer; it moves no filament.',
+      'Set what an AMS slot (A1-A4) or the external spool ("ext") holds: type (PLA, PETG, ASA, ABS, TPU, PA, PC, PLA-CF, PETG-CF, PVA...), color (RRGGBB) and brand (Generic when left out; Bambu, Polymaker...). Only tells the printer; it moves no filament.',
     input: Schema.Struct({
       printer: Schema.String,
       slot: Schema.String,
@@ -650,6 +650,40 @@ const setFilament = tool(
     }),
 )
 
+const stock = tool(
+  "stock",
+  {
+    description:
+      "The filaments on hand, which a slot's swap on the printers' widgets offers first: each a type (PLA, PETG...) and a color (RRGGBB). Replaces the list; without filaments, answers it.",
+    input: Schema.Struct({
+      filaments: Schema.optionalKey(
+        Schema.Array(Schema.Struct({ type: Schema.String, color: Schema.String })),
+      ),
+    }),
+  },
+  (input) =>
+    Effect.gen(function* stocking() {
+      if (input.filaments === undefined) {
+        return { filaments: readStock() }
+      }
+      const filaments = input.filaments.map((f) => ({
+        type: f.type.trim().toUpperCase(),
+        color: f.color.replace(/^#/u, "").toUpperCase(),
+      }))
+      const bad = filaments.find((f) => !/^[0-9A-F]{6}$/u.test(f.color) || f.type === "")
+      if (bad) {
+        return yield* Effect.fail(new Error(`${bad.type} ${bad.color}: a type and an RRGGBB color`))
+      }
+      yield* Effect.try({
+        try: () => {
+          writeStock(filaments)
+        },
+        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+      })
+      return { filaments }
+    }),
+)
+
 const files = tool(
   "files",
   {
@@ -666,14 +700,28 @@ const files = tool(
     }),
 )
 
+/** A frame older than this isn't live: a widget asking for a `fresh` one gets none. */
+const FRESH_MS = 5000
+
 const camera = tool(
   "camera",
-  { description: "A printer's camera, now.", readOnly: true, input: which },
+  {
+    description:
+      "A printer's camera, now. fresh: only a frame from the last few seconds, else no picture (data empty).",
+    readOnly: true,
+    input: Schema.Struct({ printer: Schema.String, fresh: Schema.optionalKey(Schema.Boolean) }),
+  },
   (input) =>
     Effect.gen(function* looking() {
       const printers = yield* Printers
       const e = yield* find(printers, input.printer)
       const frame = yield* attempt(async () => await e.camera.frame())
+      if (
+        input.fresh === true &&
+        (!frame || frame.source !== "live" || Date.now() - frame.at > FRESH_MS)
+      ) {
+        return { printer: e.printer.id, mimeType: "image/jpeg", data: "" }
+      }
       if (!frame) {
         return yield* Effect.fail(new Error(e.camera.problem || "No picture"))
       }
@@ -1450,8 +1498,9 @@ const wait = tool(
 // ── Widgets ──
 
 /**
- * One printer as its widget draws it: its line (mark, name, job, progress, time left) over a Pick
- * per AMS slot or the external spool, then its camera. Only the user's clients call it.
+ * One printer as its widget draws it: its live camera, its line laid on the picture (its mark when
+ * it needs someone, its name, where it's at), and a Pick per AMS slot and the external spool. Only the
+ * user's clients call it.
  */
 const cardTool = (p: Printer) =>
   tool(
@@ -1462,13 +1511,13 @@ const cardTool = (p: Printer) =>
         const printers = yield* Printers
         const e = yield* find(printers, p.id)
         const v = printers.view(e)
-        return { line: lineOf(v, printers.doneAt(v)), camera: { printer: p.id } }
+        return { line: lineOf(v, printers.doneAt(v)), camera: { printer: p.id, fresh: true } }
       }),
   )
 
 const cards = PRINTERS.map(cardTool)
 
-// A printer is one cell: its live camera and its line (its name, where it's at). Every printer's
+// A printer is one cell: its live camera, its name on it, what it holds under it. Every printer's
 // widget keeps the camera's frame, so they sit alike.
 const printerWidget = (p: Printer): WidgetDef => ({
   name: `printer-${p.id}`,
@@ -1496,7 +1545,15 @@ const printerWidget = (p: Printer): WidgetDef => ({
   ],
   a2ui: () =>
     surface("printer", SWITCH_CATALOG, [
-      { id: "root", component: "Column", catalogId: BASIC_CATALOG, children: ["lines", "camera"] },
+      { id: "root", component: "Column", catalogId: BASIC_CATALOG, children: ["camera", "lines"] },
+      {
+        id: "camera",
+        component: "Feed",
+        action: "camera",
+        args: { "@path": "/camera" },
+        every: 1000,
+        ratio: 16 / 9,
+      },
       { id: "lines", component: "List", catalogId: BASIC_CATALOG, children: ["line"] },
       {
         id: "line",
@@ -1504,10 +1561,8 @@ const printerWidget = (p: Printer): WidgetDef => ({
         label: { "@path": "/line/label" },
         mark: { "@path": "/line/mark" },
         detail: { "@path": "/line/detail" },
+        note: { "@path": "/line/note" },
         alert: { "@path": "/line/alert" },
-        values: { "@path": "/line/values" },
-        progress: { "@path": "/line/progress" },
-        endsAt: { "@path": "/line/endsAt" },
         children: { componentId: "cell", path: "/line/cells" },
       },
       {
@@ -1519,16 +1574,8 @@ const printerWidget = (p: Printer): WidgetDef => ({
         title: { "@path": "title" },
         current: { "@path": "current" },
         args: { "@path": "args" },
-        groups: SWAP,
+        groups: swapOf(readStock()),
         action: "set_filament",
-      },
-      {
-        id: "camera",
-        component: "Feed",
-        action: "camera",
-        args: { "@path": "/camera" },
-        every: 1000,
-        ratio: 16 / 9,
       },
     ]),
 })
@@ -1542,6 +1589,7 @@ export const printersApp = defineApp<Printers>({
     "Printing: inspect STLs made elsewhere and pick the bed face; slice; read the summary (time, filament_g, objects, bed_C) and every check WARNING, and say the time; confirm the printer's bed is clear (FINISH means the last part is likely still on it); print (dryRun first to see the plan); wait until printing. Every print records a timelapse (timelapse list; timelapse_saved says where); jobs is the history.",
     "Swapping the external spool: heat to the old filament's temperature, unload, have the new one fed in, extrude until it runs clean, then set_filament.",
     "After a spool swap, set_filament on that slot or the external spool right away: print matches the plate against what the printer reports.",
+    "stock: the filaments on hand (type and RRGGBB), which the widgets' slot swap offers first; set it whenever what's on hand changes.",
   ].join("\n"),
   tools: [
     status,
@@ -1549,6 +1597,7 @@ export const printersApp = defineApp<Printers>({
     camera,
     files,
     setFilament,
+    stock,
     pause,
     resume,
     stop,

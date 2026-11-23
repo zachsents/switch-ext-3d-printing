@@ -91,14 +91,45 @@ export const parseMessage = (payload: string): Message => {
   return push ? { push, reply } : { reply }
 }
 
+/** Lists of records with ids merged by id, each record key by key; what the old list had and the new lacks stays. */
+const byId = (old: unknown, now: unknown, inner?: (a: Raw, b: Raw) => Raw): unknown => {
+  if (!Array.isArray(old) || !Array.isArray(now)) {
+    return now
+  }
+  const out: unknown[] = old.filter(isRecord).map((x) => ({ ...x }))
+  for (const n of now) {
+    if (!isRecord(n)) {
+      continue
+    }
+    const at = out.findIndex((o) => isRecord(o) && o.id === n.id)
+    const was = at === -1 ? undefined : out[at]
+    if (was === undefined || !isRecord(was)) {
+      out.push(n)
+    } else {
+      out[at] = inner ? inner(was, n) : { ...was, ...n }
+    }
+  }
+  return out
+}
+
+const unitMerge = (a: Raw, b: Raw): Raw => ({ ...a, ...b, tray: byId(a.tray, b.tray) })
+
 /**
  * The state with a push merged in. Pushes carry only what changed, and the AMS block too: a push
- * can bring `ams` with just `tray_now`, so it's merged key by key (a slot list comes whole).
+ * can bring `ams` with just `tray_now`, or a unit with only the slot that changed, or a slot with
+ * only its new keys, so units and slots are merged by id, key by key. Whether a slot holds a spool
+ * is read from `tray_exist_bits` (slotOf), so a slot emptied keeps no stale type.
  */
 export const mergePush = (raw: Raw, push: Raw): Raw => {
   const merged = { ...raw, ...push }
   if (isRecord(raw.ams) && isRecord(push.ams)) {
-    merged.ams = { ...raw.ams, ...push.ams }
+    merged.ams = { ...raw.ams, ...push.ams, ams: byId(raw.ams.ams, push.ams.ams, unitMerge) }
+  }
+  if (Array.isArray(push.vir_slot)) {
+    merged.vir_slot = byId(raw.vir_slot, push.vir_slot)
+  }
+  if (isRecord(raw.vt_tray) && isRecord(push.vt_tray)) {
+    merged.vt_tray = { ...raw.vt_tray, ...push.vt_tray }
   }
   return merged
 }
@@ -135,21 +166,31 @@ const tagged = (x: unknown) => {
   return s !== undefined && s.replaceAll("0", "") !== ""
 }
 
-const slotOf = (t: Raw, tray: number, now: string, exist: number): Slot => {
+/** An AMS HT's unit id: 128 on. It has one slot. */
+const HT = 128
+
+/** A slot as the printer's screen names it: A1..D4, HT1.. for an AMS HT. */
+const slotName = (unit: number, tray: number) =>
+  unit >= HT ? `HT${unit - HT + 1}` : `${"ABCD"[unit] ?? String(unit)}${tray + 1}`
+
+const slotOf = (t: Raw, tray: number, now: string, exist: number | undefined): Slot => {
   const unit = Math.floor(tray / 4)
-  const type = text(t.tray_type)
+  // A slot emptied can keep its last type in the merged state: the existence bits say (units A-D).
+  const there =
+    exist === undefined || unit >= 4 ? undefined : Math.floor(exist / 2 ** tray) % 2 === 1
+  const type = there === false ? undefined : text(t.tray_type)
   const color = type === undefined ? undefined : hex6(str(t.tray_color))
   const brand = text(t.tray_sub_brands) ?? brandOf(str(t.tray_info_idx) ?? "")
   const remain = num(t.remain)
   return {
-    slot: `${"ABCD"[unit] ?? String(unit)}${(tray % 4) + 1}`,
+    slot: slotName(unit, tray % 4),
     tray,
-    loaded: type !== undefined || Math.floor(exist / 2 ** tray) % 2 === 1,
+    loaded: there ?? type !== undefined,
     ...(type === undefined ? {} : { type }),
     ...(color === undefined ? {} : { color }),
     ...(brand === undefined || type === undefined ? {} : { brand }),
-    ...(remain === undefined || remain < 0 ? {} : { remain }),
-    rfid: tagged(t.tray_uuid) || tagged(t.tag_uid),
+    ...(remain === undefined || remain < 0 || type === undefined ? {} : { remain }),
+    rfid: type !== undefined && (tagged(t.tray_uuid) || tagged(t.tag_uid)),
     active: now === String(tray),
   }
 }
@@ -158,7 +199,8 @@ const slotOf = (t: Raw, tray: number, now: string, exist: number): Slot => {
 export const slotsOf = (raw: Raw): Slot[] => {
   const ams = isRecord(raw.ams) ? raw.ams : {}
   const now = str(ams.tray_now) ?? "255"
-  const exist = Number.parseInt(str(ams.tray_exist_bits) ?? "0", 16) || 0
+  const bits = str(ams.tray_exist_bits)
+  const exist = bits === undefined ? undefined : Number.parseInt(bits, 16) || 0
   const out: Slot[] = []
   for (const unit of list(ams.ams).filter(isRecord)) {
     const a = Number(unit.id ?? 0)
@@ -267,8 +309,17 @@ export interface View {
   readonly hold?: { readonly nozzle: number; readonly bed?: number; readonly until: number }
 }
 
+/** The external spool's record: `vt_tray`, or on H2 and P2S the main extruder's in `vir_slot` (255). */
+const extOf = (raw: Raw): Raw => {
+  if (isRecord(raw.vt_tray)) {
+    return raw.vt_tray
+  }
+  const virtual = list(raw.vir_slot).filter(isRecord)
+  return virtual.find((v) => String(v.id) === "255") ?? virtual[0] ?? {}
+}
+
 const spoolOf = (raw: Raw) => {
-  const vt = isRecord(raw.vt_tray) ? raw.vt_tray : {}
+  const vt = extOf(raw)
   const type = text(vt.tray_type)
   return type === undefined ? {} : { spool: { type, color: hex6(str(vt.tray_color)) ?? "" } }
 }
