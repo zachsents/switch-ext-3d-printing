@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import { cellsFor, lineOf, swapOf } from "./board.ts"
+import { shortOf } from "./short.ts"
 import { mergePush, slotsOf, viewOf } from "./state.ts"
 
 const tray = (id: string, type: string, color: string) => ({
@@ -127,5 +128,39 @@ describe("the widget", () => {
     expect(type?.choices.slice(0, 2)).toEqual(["PVA", "PLA"])
     expect(color?.choices[0]).toBe("F0E6D2")
     expect(color).toMatchObject({ swatches: true, custom: true })
+  })
+})
+
+describe("trouble in a word or two", () => {
+  test("the usual ones by what they say", () => {
+    expect(
+      shortOf(
+        "Nozzle camera lens is dirty, which may affect the AI monitoring functionality. Please clean the surface of the nozzle camera lens as soon as possible.",
+      ),
+    ).toBe("Lens dirty")
+    expect(shortOf("AMS-HT F Slot 3 filament has run out. Please insert a new filament.")).toBe(
+      "Filament out",
+    )
+    expect(shortOf("The heatbed temperature is abnormal; the heater may be broken.")).toBe("Bed temp")
+  })
+
+  test("any other by its own first words", () => {
+    expect(shortOf("Failed to extrude the filament.")).toBe("Extrude failed")
+    expect(shortOf("Homing Z axis failed: temperature control abnormality.")).toBe("Homing failed")
+    expect(shortOf("The toolhead voltage is low.")).toBe("Voltage low")
+  })
+
+  test("the plate says it short; the note says it whole", () => {
+    const lens = "Nozzle camera lens is dirty, which may affect the AI monitoring functionality."
+    const line = lineOf(
+      viewOf(
+        { id: "h2c", name: "Delta", model: "H2C" },
+        { ...full, gcode_state: "RUNNING", hms: [{ attr: 0x0c_00_01_00, code: 0x00_02_00_01 }] },
+        true,
+        new Map([["0C00010000020001", lens]]),
+        0,
+      ),
+    )
+    expect(line).toMatchObject({ detail: "Lens dirty", note: lens, alert: true, mark: "warn" })
   })
 })

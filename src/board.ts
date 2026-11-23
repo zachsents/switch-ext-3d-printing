@@ -6,6 +6,7 @@ import path from "node:path"
 
 import { Option, Schema } from "effect"
 
+import { shortOf } from "./short.ts"
 import type { View } from "./state.ts"
 
 /** Types every swap offers, then those on hand. */
@@ -83,6 +84,8 @@ export interface Line {
   readonly label: string
   readonly mark: string
   readonly detail: string
+  /** What's wrong in full, when the detail says it in a word or two. */
+  readonly note: string
   readonly alert: boolean
   readonly values: readonly string[]
   readonly progress: number | null
@@ -169,16 +172,20 @@ const stateOf = (v: View, doneAt: number | null) => {
   }
 }
 
-/** Its line: its name, and what's wrong, else where it's at (`doneAt`: when its last job ended). */
+/**
+ * Its line: its name, and what's wrong in a word or two (in full as its note), else where it's at
+ * (`doneAt`: when its last job ended).
+ */
 export const lineOf = (v: View, doneAt: number | null = null): Line => {
   const active = ACTIVE.has(v.phase)
   const wrong = v.errors.map((a) => a.text ?? a.code).find((t) => t !== "")
-  const detail = wrong ?? stateOf(v, doneAt)
+  const detail = wrong === undefined ? stateOf(v, doneAt) : shortOf(wrong)
   return {
     id: v.id,
     label: v.name,
     mark: markOf(v),
     detail,
+    note: wrong ?? "",
     alert: wrong !== undefined,
     values: [],
     progress: active ? v.percent : null,

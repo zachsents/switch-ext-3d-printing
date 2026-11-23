@@ -1551,6 +1551,7 @@ const printerWidget = (p: Printer): WidgetDef => ({
         label: { "@path": "/line/label" },
         mark: { "@path": "/line/mark" },
         detail: { "@path": "/line/detail" },
+        note: { "@path": "/line/note" },
         alert: { "@path": "/line/alert" },
         children: { componentId: "cell", path: "/line/cells" },
       },
