@@ -1,9 +1,10 @@
-// The printers' events, each versioned: what changed on a printer, and its jobs.
+// The printers' events, each versioned: what changed on a printer, its jobs and their timelapses. A job's
+// events carry its id (`<printer id>-<startedAt ms>`), and the problem in Bambu's words where there is one.
 import { defineEvent } from "switch-ext-kit"
 import { Schema } from "effect"
 
 const who = { printer: Schema.String, name: Schema.String }
-const job = { ...who, file: Schema.String }
+const job = { ...who, file: Schema.String, job: Schema.String }
 const progress = {
   percent: Schema.Finite,
   layer: Schema.Finite,
@@ -58,6 +59,35 @@ export const JobFailed = defineEvent(
     percent: Schema.Finite,
   }),
 )
+/** Paused on a problem: not by a person (stages 16, 5 and 30). */
+export const JobPaused = defineEvent(
+  "printers.job_paused",
+  1,
+  Schema.Struct({
+    ...job,
+    reason: Schema.optionalKey(Schema.String),
+    layer: Schema.Finite,
+    layers: Schema.Finite,
+  }),
+)
+/** Its printer gave no report for five minutes mid-job: power or Wi-Fi. */
+export const JobLost = defineEvent(
+  "printers.job_lost",
+  1,
+  Schema.Struct({ ...job, minutes: Schema.Finite, layer: Schema.Finite, layers: Schema.Finite }),
+)
+const recorded = { ...who, file: Schema.String, job: Schema.optionalKey(Schema.String) }
+/** A print's timelapse, encoded: the video and its preview (the last frame, small), absolute paths. */
+export const TimelapseSaved = defineEvent(
+  "printers.timelapse_saved",
+  1,
+  Schema.Struct({ ...recorded, video: Schema.String, preview: Schema.optionalKey(Schema.String) }),
+)
+export const TimelapseFailed = defineEvent(
+  "printers.timelapse_failed",
+  1,
+  Schema.Struct({ ...recorded, reason: Schema.String }),
+)
 export const FilamentRanOut = defineEvent(
   "printers.filament_ran_out",
   1,
@@ -87,6 +117,10 @@ export const EVENTS = [
   JobProgress,
   JobFinished,
   JobFailed,
+  JobPaused,
+  JobLost,
+  TimelapseSaved,
+  TimelapseFailed,
   FilamentRanOut,
   PrinterError,
   SlotsChanged,
