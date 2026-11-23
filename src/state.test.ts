@@ -163,6 +163,6 @@ describe("trouble in a word or two", () => {
         0,
       ),
     )
-    expect(line).toMatchObject({ detail: "Lens dirty", note: lens, alert: true, mark: "warn" })
+    expect(line).toMatchObject({ detail: "Lens dirty · 0%", note: lens, alert: true, mark: "warn" })
   })
 })

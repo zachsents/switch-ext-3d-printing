@@ -179,7 +179,11 @@ const stateOf = (v: View, doneAt: number | null) => {
 export const lineOf = (v: View, doneAt: number | null = null): Line => {
   const active = ACTIVE.has(v.phase)
   const wrong = v.errors.map((a) => a.text ?? a.code).find((t) => t !== "")
-  const detail = wrong === undefined ? stateOf(v, doneAt) : shortOf(wrong)
+  // What's wrong comes first; while a job runs, how far it's got stays beside it.
+  let detail = stateOf(v, doneAt)
+  if (wrong !== undefined) {
+    detail = active ? `${shortOf(wrong)} · ${v.percent}%` : shortOf(wrong)
+  }
   return {
     id: v.id,
     label: v.name,
