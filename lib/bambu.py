@@ -657,6 +657,7 @@ def slice_cmd(args) -> None:
     if stock() and args.soak:
         sys.exit(f"the {MODEL} slices with Bambu's own G-code only, so no soak is written in; drop --soak")
     out = Path(args.out).expanduser().resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
     big = [obj[0][0] for obj in objects if footprint_mm(obj) > BIG_FOOTPRINT_MM]
     filaments, explicit = slice_filaments(args, count, bool(big))
     kinds = [material(f["filament_type"][0]) for f in filaments]
@@ -1682,6 +1683,14 @@ def unfit(s: dict, filaments: list[dict], req: dict) -> str | None:
     return None
 
 
+def stock_unfit(here: str | None, sliced: str | None) -> str | None:
+    """Why a stock-only printer (STOCK_MODELS) can't take a plate sliced for another model, or None: plan refuses it,
+    so auto must not pick it."""
+    if here in STOCK_MODELS and sliced != here:
+        return f"a {here}, which runs only plates sliced for the {here} (this one is for the {sliced or 'unknown printer'})"
+    return None
+
+
 def pick_printer(path: Path, printers: dict, req: dict) -> tuple[str, str]:
     """Printer `auto`: an IDLE printer, else a FINISH one (its last print may still be on the bed), that has the
     slice's filaments loaded (external spool, or AMS slots by type and color); a known match beats an unknown spool,
@@ -1689,7 +1698,8 @@ def pick_printer(path: Path, printers: dict, req: dict) -> tuple[str, str]:
     (its report, or a string saying why there's none), model}. Returns the id and a line saying why."""
     filaments, names, model = sliced_filaments(path), list(printers), sliced_model(path)
     results = {n: printers[n]["state"] for n in names}
-    reasons = {n: r if isinstance(r, str) else unfit(r, filaments, req) for n, r in results.items()}
+    reasons = {n: r if isinstance(r, str) else stock_unfit(printers[n].get("model"), model) or unfit(r, filaments, req)
+               for n, r in results.items()}
     ok = [n for n, why in reasons.items() if why is None]
     sliced = "+".join(f["type"] or "?" for f in filaments)
     if not ok:
