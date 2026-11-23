@@ -1488,8 +1488,8 @@ const wait = tool(
 // ── Widgets ──
 
 /**
- * One printer as its widget draws it: its live camera, its line laid on the picture (mark, name,
- * where it's at, time left), and a Pick per AMS slot and the external spool under it. Only the
+ * One printer as its widget draws it: its live camera, its line laid on the picture (its mark when
+ * it needs someone, its name, where it's at), and a Pick per AMS slot and the external spool. Only the
  * user's clients call it.
  */
 const cardTool = (p: Printer) =>
@@ -1552,9 +1552,6 @@ const printerWidget = (p: Printer): WidgetDef => ({
         mark: { "@path": "/line/mark" },
         detail: { "@path": "/line/detail" },
         alert: { "@path": "/line/alert" },
-        values: { "@path": "/line/values" },
-        progress: { "@path": "/line/progress" },
-        endsAt: { "@path": "/line/endsAt" },
         children: { componentId: "cell", path: "/line/cells" },
       },
       {

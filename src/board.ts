@@ -67,7 +67,6 @@ export const swapOf = (stock: readonly Stocked[]) => [
     custom: true,
     choices: unique([...stock.map((x) => x.color.toUpperCase()), ...PALETTE]),
   },
-  { key: "brand", choices: ["Generic", "Bambu"] },
 ]
 
 export interface Cell {
@@ -75,7 +74,7 @@ export interface Cell {
   readonly swatch: string
   readonly strong: boolean
   readonly title: string
-  readonly current: { readonly type: string; readonly color: string; readonly brand: string }
+  readonly current: { readonly type: string; readonly color: string }
   readonly args: { readonly printer: string; readonly slot: string }
 }
 
@@ -94,9 +93,6 @@ export interface Line {
 const ACTIVE = new Set(["printing", "preparing", "paused"])
 
 const markOf = (v: View) => {
-  if (v.phase === "printing" || v.phase === "preparing") {
-    return "running"
-  }
   // Paused waits on the user; finished is idle, as Bambu reports it until the next job.
   if (v.phase === "paused") {
     return "needsYou"
@@ -107,41 +103,44 @@ const markOf = (v: View) => {
   return v.errors.length > 0 ? "warn" : ""
 }
 
-const brand = (b: string | undefined) => (b === "Bambu" ? "Bambu" : "Generic")
-
-/** Each AMS slot, then the external spool: the slot's name and what it holds ("A1 PLA"). */
+/** Each AMS slot, then the external spool: its name ("A1", "Ext") and what it holds ("PLA"). */
 export const cellsFor = (v: View): Cell[] => [
   ...v.slots.map((s): Cell => ({
-    label: s.type === undefined ? s.slot : `${s.slot} ${s.type}`,
+    label: s.type ?? "",
     swatch: s.color ?? "",
     strong: s.active,
     title: s.slot,
-    current: { type: s.type ?? "PLA", color: s.color ?? "FFFFFF", brand: brand(s.brand) },
+    current: { type: s.type ?? "PLA", color: s.color ?? "FFFFFF" },
     args: { printer: v.id, slot: s.slot },
   })),
   {
-    label: v.spool ? `Ext ${v.spool.type}` : "Ext",
+    label: v.spool?.type ?? "",
     swatch: v.spool?.color ?? "",
     strong: false,
     title: "Ext",
-    current: {
-      type: v.spool?.type ?? "PLA",
-      color: v.spool?.color ?? "FFFFFF",
-      brand: "Generic",
-    },
+    current: { type: v.spool?.type ?? "PLA", color: v.spool?.color ?? "FFFFFF" },
     args: { printer: v.id, slot: "ext" },
   },
 ]
+
+/** Minutes as words: "1h 45m", "12m". */
+const span = (minutes: number) => {
+  const h = Math.floor(minutes / 60)
+  const m = minutes % 60
+  return h > 0 ? `${h}h ${m}m` : `${m}m`
+}
 
 /** A time of day: "12:23 AM". */
 const timeOf = (ms: number) =>
   new Date(ms).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
 
-/** Where it's at, as its plate says it: "Printing 43%", "Done 12:23 AM", "Idle" (time left is the countdown). */
+/** Where it's at, as its plate says it: "Printing 43% · 1h 12m left", "Done 12:23 AM", "Idle". */
 const stateOf = (v: View, doneAt: number | null) => {
   switch (v.phase) {
     case "printing": {
-      return `Printing ${v.percent}%`
+      return v.minutesLeft > 0
+        ? `Printing ${v.percent}% · ${span(v.minutesLeft)} left`
+        : `Printing ${v.percent}%`
     }
     case "preparing": {
       return v.stage ?? "Preparing"

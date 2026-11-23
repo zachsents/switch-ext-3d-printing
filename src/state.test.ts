@@ -95,12 +95,12 @@ describe("the widget", () => {
     const spooled = mergePush(full, {
       vir_slot: [{ id: "255", tray_type: "PETG", tray_color: "FFFFFFFF" }],
     })
-    expect(cellsFor(view(spooled)).map((c) => [c.label, c.swatch, c.args.slot])).toEqual([
-      ["A1 PLA", "161616", "A1"],
-      ["A2", "", "A2"],
-      ["A3", "", "A3"],
-      ["A4", "", "A4"],
-      ["Ext PETG", "FFFFFF", "ext"],
+    expect(cellsFor(view(spooled)).map((c) => [c.title, c.label, c.swatch, c.args.slot])).toEqual([
+      ["A1", "PLA", "161616", "A1"],
+      ["A2", "", "", "A2"],
+      ["A3", "", "", "A3"],
+      ["A4", "", "", "A4"],
+      ["Ext", "PETG", "FFFFFF", "ext"],
     ])
   })
 
@@ -109,19 +109,21 @@ describe("the widget", () => {
       gcode_state: "IDLE",
       vt_tray: { id: "254", tray_type: "PLA", tray_color: "000000FF" },
     }
-    expect(cellsFor(view(p1p)).map((c) => c.label)).toEqual(["Ext PLA"])
+    expect(cellsFor(view(p1p)).map((c) => [c.title, c.label])).toEqual([["Ext", "PLA"]])
   })
 
-  test("printing says its percent; the countdown says the time left", () => {
+  test("printing says its percent and the time left, in words", () => {
     const line = lineOf(
       view({ ...full, gcode_state: "RUNNING", mc_percent: 43, mc_remaining_time: 72 }),
     )
-    expect(line.detail).toBe("Printing 43%")
+    expect(line.detail).toBe("Printing 43% · 1h 12m left")
+    expect(line.mark).toBe("")
     expect(line.endsAt).toBe(72 * 60_000)
   })
 
   test("the swap offers what's on hand first, and any color", () => {
-    const [type, color] = swapOf([{ type: "pva", color: "f0e6d2" }])
+    const [type, color, brand] = swapOf([{ type: "pva", color: "f0e6d2" }])
+    expect(brand).toBeUndefined()
     expect(type?.choices.slice(0, 2)).toEqual(["PVA", "PLA"])
     expect(color?.choices[0]).toBe("F0E6D2")
     expect(color).toMatchObject({ swatches: true, custom: true })
