@@ -33,6 +33,10 @@ On the machine that runs it:
   it was down is still reported; every job's history (`jobs.jsonl`, the `jobs` tool); recordings
   in progress (`timelapses.json`, carried on after a restart into the same frames); each printer's
   last spool (`last-spool.json`, for the purge after a spool change); and slicing scratch (`work/`).
+- `printers.heartbeat` comes from the ticker that steps the printers, every 5 minutes and at once
+  when `failing` changes: what's wrong now (a printer's session down a minute for a reason other
+  than nothing answering, work on a printer's reports that threw, finding moved printers), or null.
+  A printer that answers nothing is off, not failing. Each printer's state is in its facts.
 - A print's Live Activity shows in the space of the work that sent it (kept with the job), else
   the space holding that printer's widget, else Home.
 - Running uses one activity slot per printer. On reconnect, a running printer replaces

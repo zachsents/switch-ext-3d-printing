@@ -61,6 +61,7 @@ import type { Raw, View } from "./state.ts"
 import { makingTools } from "./making.ts"
 import { INTERVAL_S, MIN_INTERVAL_S, plateStem, Recorders, timelapseRoot } from "./timelapse.ts"
 import { track } from "./track.ts"
+import { BEAT_MS, heartbeat } from "./vitals.ts"
 import { plateRoute, tunnelUpload } from "./tunnel.ts"
 import type { Seen } from "./track.ts"
 import { lineOf, readStock, swapOf, writeStock } from "./board.ts"
@@ -385,9 +386,14 @@ export class Printers extends Context.Service<
         /** Down printers heard at a new address (DHCP moved them) get their env file's host rewritten. */
         const downSince = new Map<string, number>()
         let rehomedAt = 0
+        /** Why finding moved printers failed, until it next works or none is down. */
+        let rehomeProblem: string | null = null
         const rehome = async () => {
           const now = Date.now()
           const down = entries.filter((e) => now - (downSince.get(e.printer.id) ?? now) > DOWN_MS)
+          if (down.length === 0) {
+            rehomeProblem = null
+          }
           if (SIM || down.length === 0 || now - rehomedAt < REHOME_MS) {
             return
           }
@@ -411,25 +417,73 @@ export class Printers extends Context.Service<
               e.link.reconnect()
             }
           }
+          rehomeProblem = null
+        }
+
+        /** Work on a printer's reports that threw, by printer and part, until that part works again:
+         * one printer's failing never stops the rest. */
+        const broken = new Map<string, Map<string, string>>()
+        const guard = (e: Entry, part: string, work: (e: Entry) => void) => {
+          const { id } = e.printer
+          try {
+            work(e)
+            broken.get(id)?.delete(part)
+          } catch (error) {
+            const words = error instanceof Error ? error.message : String(error)
+            const parts = broken.get(id) ?? new Map<string, string>()
+            if (parts.get(part) !== words) {
+              console.error(`${id} ${part}: ${words}`)
+            }
+            parts.set(part, words)
+            broken.set(id, parts)
+          }
+        }
+
+        let beatAt = 0
+        let lastFailing: string | null = null
+        /** The heartbeat, from the ticker: every BEAT_MS, and at once when what's failing changes. */
+        const beat = () => {
+          const now = Date.now()
+          const { draft, failing } = heartbeat(
+            entries.map((e) => {
+              const online = e.link.online()
+              return {
+                id: e.printer.id,
+                name: e.printer.name,
+                online,
+                problem: e.link.problem,
+                downFor: online ? 0 : now - (downSince.get(e.printer.id) ?? now),
+                errors: [...(broken.get(e.printer.id) ?? [])].map(
+                  ([part, words]) => `${part} failed: ${words}`,
+                ),
+              }
+            }),
+            rehomeProblem === null ? [] : [`Finding moved printers: ${rehomeProblem}`],
+          )
+          if (failing !== lastFailing || now - beatAt >= BEAT_MS) {
+            beatAt = now
+            lastFailing = failing
+            emit(draft)
+          }
         }
 
         for (const e of entries) {
           e.link.subscribe(() => {
-            step(e)
-            keep(e)
-            keepLight(e)
+            guard(e, "reports", step)
+            guard(e, "heat hold", keep)
+            guard(e, "light", keepLight)
           })
         }
         const keeper = setInterval(() => {
           for (const e of entries) {
-            keep(e)
-            keepLight(e)
+            guard(e, "heat hold", keep)
+            guard(e, "light", keepLight)
           }
         }, 2000)
         // Offline only counts after GONE_MS, which no report marks.
         const ticker = setInterval(() => {
           for (const e of entries) {
-            step(e)
+            guard(e, "reports", step)
             if (e.link.online()) {
               downSince.delete(e.printer.id)
             } else if (!downSince.has(e.printer.id)) {
@@ -440,9 +494,11 @@ export class Printers extends Context.Service<
             try {
               await rehome()
             } catch (error) {
+              rehomeProblem = error instanceof Error ? error.message : String(error)
               console.error(`rehome: ${String(error)}`)
             }
           })()
+          beat()
         }, 5000)
         yield* Effect.addFinalizer(() =>
           Effect.sync(() => {

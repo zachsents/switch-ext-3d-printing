@@ -110,6 +110,31 @@ export const SlotsChanged = defineEvent(
   Schema.Struct({ ...who, slots: Schema.Array(slotFacts) }),
 )
 
+/**
+ * Whether the sense works: every 5 minutes from the ticker that steps the printers, and at once when
+ * `failing` changes. `failing` is what's wrong now (a session down for a reason other than the
+ * printer being off, work on a printer's reports that threw), or null.
+ */
+export const Heartbeat = defineEvent(
+  "printers.heartbeat",
+  1,
+  Schema.Struct({
+    entity: Schema.Literal("sense:printers"),
+    summary: Schema.String,
+    facts: Schema.Struct({
+      failing: Schema.NullOr(Schema.String),
+      printers: Schema.Array(
+        Schema.Struct({
+          ...who,
+          state: Schema.Literals(["online", "connecting", "off", "down"]),
+          problem: Schema.optionalKey(Schema.String),
+          errors: Schema.optionalKey(Schema.Array(Schema.String)),
+        }),
+      ),
+    }),
+  }),
+)
+
 export const EVENTS = [
   StateChanged,
   PrinterRenamed,
@@ -124,4 +149,5 @@ export const EVENTS = [
   FilamentRanOut,
   PrinterError,
   SlotsChanged,
+  Heartbeat,
 ]
