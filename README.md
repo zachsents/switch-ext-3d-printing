@@ -15,7 +15,8 @@ Extensions view (⌘K, Extensions). Switch runs it on the first machine with wha
 On the machine that runs it:
 
 - [uv](https://docs.astral.sh/uv/) and Bambu Studio in `/Applications` (or `$BAMBU_STUDIO`): the library
-  slices with Studio's CLI and presets. ffmpeg for timelapse videos.
+  slices with Studio's CLI and presets. ffmpeg for timelapse videos and for X1 and H2 cameras
+  (RTSPS on port 322, which the printer opens only while "LAN Only Liveview" is on).
 - One `<id>.env` per printer in `~/.config/bambu` (or `$PRINTERS_CONFIG`), chmod 600:
   `BAMBU_HOST`, `BAMBU_SERIAL`, `BAMBU_ACCESS_CODE` (from the printer's screen) and `NAME` for
   what to call it (rename sets it). Adding a printer is writing its file and restarting the

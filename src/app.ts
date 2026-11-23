@@ -21,7 +21,7 @@ import {
   tool,
 } from "switch-ext-kit"
 import type { Draft, WidgetDef } from "switch-ext-kit"
-import { Camera, tlsEye } from "./camera.ts"
+import { Camera, eyeFor } from "./camera.ts"
 import { COMMANDS, configured, readConnection, SIM, writeHost, writeName } from "./config.ts"
 import type { Printer } from "./config.ts"
 import { presetFor } from "./filaments.ts"
@@ -225,7 +225,7 @@ export class Printers extends Context.Service<
 
         const entries: Entry[] = PRINTERS.map((printer) => {
           const link = new Link(printer.id, SIM ? simDial : mqttDial, COMMANDS)
-          const camera = new Camera(printer.id, SIM ? simEye : tlsEye)
+          const camera = new Camera(printer.id, SIM ? simEye : eyeFor(printer.model))
           return { printer, link, camera }
         })
         const holds = new Map<string, Hold>()
