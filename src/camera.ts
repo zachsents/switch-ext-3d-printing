@@ -1,5 +1,5 @@
-// A printer's camera. P1, P2 and A1: TLS on port 6000, an 80-byte login, then length-prefixed
-// JPEGs, about one a second, as the `bambu` CLI's grab_frame read it. X1 and H2: RTSPS on port 322,
+// A printer's camera. P1 and A1: TLS on port 6000, an 80-byte login, then length-prefixed JPEGs,
+// about one a second, as the `bambu` CLI's grab_frame read it. X1, H2 and P2S: RTSPS on port 322,
 // pulled a frame at a time (rtsps.ts, rtspsEye). The camera serves one client at a time, and this
 // extension is its only one: one stream is held while someone looks, let go LINGER_MS after they
 // stop, and held throughout while a timelapse records.
@@ -109,7 +109,7 @@ export const tlsEye: Eye = (id, signal, onFrame, onEnd) => {
 }
 
 /**
- * The camera of an X1 or H2 (rtsps.ts): one-frame ffmpeg pulls, back to back, at most one a
+ * The camera of an X1, H2 or P2S (rtsps.ts): one-frame ffmpeg pulls, back to back, at most one a
  * PULL_EVERY_MS, while the stream is open. A pull that fails ends the stream, as a dropped socket
  * does; Camera retries it. Every frame comes from a pull started after the stream opened, so none is
  * older than this look.
@@ -168,7 +168,7 @@ export const makeRtspsEye =
 
 export const rtspsEye: Eye = makeRtspsEye()
 
-/** The camera a model has: RTSPS for X1 and H2, the JPEG stream on 6000 for the rest. */
+/** The camera a model has: RTSPS for X1, H2 and P2S, the JPEG stream on 6000 for the rest. */
 export const eyeFor = (model: string): Eye => (RTSPS_MODELS.has(model) ? rtspsEye : tlsEye)
 
 /** After a stream fails, wait this long before opening another. */

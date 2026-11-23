@@ -23,11 +23,12 @@ const failure = async (pulling: Promise<Buffer>) => {
 }
 
 describe("rtsps", () => {
-  test("H2C and X1 models use it, P1 and P2 don't", () => {
+  test("H2C, X1 and P2S use it, P1 and A1 don't", () => {
     expect(RTSPS_MODELS.has("H2C")).toBe(true)
     expect(RTSPS_MODELS.has("X1C")).toBe(true)
     expect(RTSPS_MODELS.has("P1S")).toBe(false)
-    expect(RTSPS_MODELS.has("P2S")).toBe(false)
+    expect(RTSPS_MODELS.has("P2S")).toBe(true)
+    expect(RTSPS_MODELS.has("A1")).toBe(false)
   })
 
   test("the access code is in the stdin list, never in the arguments", () => {

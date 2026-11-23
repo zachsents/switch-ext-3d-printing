@@ -1,4 +1,4 @@
-// The camera of an X1 or H2 printer: RTSP over TLS on port 322 (self-signed), H.264 at
+// The camera of an X1, H2 or P2S printer: RTSP over TLS on port 322 (self-signed), H.264 at
 // /streaming/live/1, user bblp, the access code as password. Port 322 opens only while "LAN Only
 // Liveview" is on in the printer's settings. These printers don't serve the P1/A1 JPEG stream on
 // port 6000: they answer its login with a short reply and close.
@@ -19,7 +19,15 @@ export const PULL_EVERY_MS = 1000
 const MAX_FRAME = 4_000_000
 
 /** Models whose camera is RTSPS on 322, not the JPEG stream on 6000. */
-export const RTSPS_MODELS: ReadonlySet<string> = new Set(["X1", "X1C", "X1E", "H2C", "H2D", "H2S"])
+export const RTSPS_MODELS: ReadonlySet<string> = new Set([
+  "X1",
+  "X1C",
+  "X1E",
+  "H2C",
+  "H2D",
+  "H2S",
+  "P2S",
+])
 
 export const ffmpegPath = () =>
   Bun.which("ffmpeg") ??
