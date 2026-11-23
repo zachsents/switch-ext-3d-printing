@@ -7,11 +7,12 @@ const conn = { host: "192.0.2.10", serial: "31B8AP000000000", accessCode: "a1b2C
 const jpegN = (n: number) => Buffer.from([0xff, 0xd8, n, 0xff, 0xd9])
 
 describe("camera", () => {
-  test("H2C and X1C get the RTSPS camera, P1S and P2S the port-6000 one", () => {
+  test("H2C and X1C and P2S get the RTSPS camera, P1S and A1 the port-6000 one", () => {
     expect(eyeFor("H2C")).toBe(rtspsEye)
     expect(eyeFor("X1C")).toBe(rtspsEye)
     expect(eyeFor("P1S")).toBe(tlsEye)
-    expect(eyeFor("P2S")).toBe(tlsEye)
+    expect(eyeFor("A1")).toBe(tlsEye)
+    expect(eyeFor("P2S")).toBe(rtspsEye)
   })
 
   test("an RTSPS camera gives a new live frame per pull, then stops pulling when let go", async () => {
