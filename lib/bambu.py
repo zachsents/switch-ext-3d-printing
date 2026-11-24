@@ -53,7 +53,7 @@ MODEL = MACHINE.split()[2]  # "P1P"
 NOZZLE = "0.4"
 # Stock-only models: their slices use Bambu's machine and process presets as Bambu ships them, with every G-code
 # routine untouched (start, leveling, the H2C's hotend-rack changes, AMS changes, end): no trimmed prime, no removed
-# vibration check, no soak dwells written in. Zach's rule for the P2S and the H2C; they were calibrated on the printer.
+# vibration check, no soak dwells written in. For the P2S and the H2C, which are calibrated on the printer.
 STOCK_MODELS = {"P2S", "H2C"}
 # Bambu names some P1S presets "@BBL P1S 0.4 nozzle" and shares the rest with the X1C, so {m} tries each in turn.
 PRESET_MODELS = {"P1S": ["P1S", "P1S 0.4 nozzle", "X1C"]}
