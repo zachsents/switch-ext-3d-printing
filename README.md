@@ -1,3 +1,5 @@
+**Moved to [zachsents/switch](https://github.com/zachsents/switch/tree/main/extensions/3d-printing).** This repo is archived.
+
 # switch-ext-3d-printing
 
 Bambu Lab printers on the LAN, and the only thing that talks to them: one MQTT session and one camera stream per printer. Live state, AMS filament, job control, the whole print (slice, plate, check, plan, purge, upload, start, wait), timelapses, the chamber light kept on through a job, job history and events for every job's start, pause, loss, end and timelapse, with printing and design rules (src/rules.md). Widgets: one per printer, its live camera (never an old frame) with its name and state laid on it, and under it every AMS slot and the external spool, each set from the widget (`set_filament`: what the slot holds, nothing moved). The swap offers what `stock` says is on hand first, then the usual types and colors, and any RRGGBB. Slicing, the check and print planning run in its own library, `lib/bambu.py`, which never connects to a printer.
