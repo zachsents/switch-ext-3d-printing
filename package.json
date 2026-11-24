@@ -35,6 +35,7 @@
   "extension": {
     "name": "printers",
     "main": "src/main.ts",
+    "heartbeat": 360000,
     "needs": [
       "lan:printers"
     ],
